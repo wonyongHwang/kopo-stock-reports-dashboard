@@ -1,0 +1,8 @@
+requests
+pdfminer.six
+beautifulsoup4
+pandas
+google-cloud-firestore
+google-auth
+streamlit
+pyngrok==4.1.1
