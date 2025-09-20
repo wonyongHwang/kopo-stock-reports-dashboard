@@ -13,6 +13,8 @@ from typing import List, Dict, Any, Tuple
 
 import streamlit as st
 import pandas as pd
+import datetime as dt
+import pytz
 
 from google.cloud import firestore
 
@@ -33,6 +35,25 @@ def _norm_url(x: str) -> str:
     return "https://" + s
 
 
+
+KST = pytz.timezone("Asia/Seoul")
+
+def format_ts(ts, tz=KST):
+    """Firestore Timestamp 또는 문자열/None → 보기용 문자열"""
+    if not ts:
+        return "-"
+    try:
+        # Firestore Timestamp -> datetime
+        dt_utc = ts if isinstance(ts, dt.datetime) else ts.to_datetime()
+    except Exception:
+        # '2025-09-05' 같은 문자열일 수도 있음
+        try:
+            dt_utc = dt.datetime.fromisoformat(str(ts))
+        except Exception:
+            return str(ts)
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=dt.timezone.utc)
+    return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 # ===============================
 # Firestore Client & Caches
 # ===============================
@@ -328,11 +349,43 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
 
     return df.sort_values(["RankScore","Reports"], ascending=[False, False]).reset_index(drop=True)
 
+def get_last_updated_from_docs(docs):
+    latest = None
+    for d in docs:
+        ts = d.get("updated_at")
+        if ts is None:
+            continue
+        # Firestore Timestamp 비교
+        try:
+            t = ts if isinstance(ts, dt.datetime) else ts.to_datetime()
+        except Exception:
+            # 문자열일 수도 있음
+            try:
+                t = dt.datetime.fromisoformat(str(ts))
+            except Exception:
+                continue
+        if latest is None or t > latest:
+            latest = t
+    return latest
+
 # ===============================
 # Streamlit UI
 # ===============================
-st.set_page_config(page_title="Analyst Ranking Dashboard (Horizon)", layout="wide")
-st.title("📊 Analyst Ranking & Evidence (Horizon-only)")
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+st.title("📊 종목리포트 평가 랭킹보드")
+
+# ---- 면책 조항 ----
+st.markdown("---")
+st.markdown(
+    """
+    ⚠️ **면책 조항 (Disclaimer)**  
+    본 사이트는 **한국폴리텍대학 스마트금융과 학생들의 실습 목적**으로 제작된 것입니다.  
+    따라서 제공되는 데이터와 랭킹은 오류가 있을 수 있으며, 어떠한 공신력도 갖지 않습니다.  
+    또한, 본 사이트의 정보를 기반으로 한 **투자 결정 및 그 결과에 대한 책임은 전적으로 이용자 본인에게** 있습니다.  
+    제작자는 투자 손실 등 어떠한 법적 책임도 지지 않습니다.
+    """,
+    unsafe_allow_html=True
+)
 
 # Sidebar Filters
 # with st.sidebar:
@@ -398,6 +451,8 @@ with st.spinner("Loading analyst documents..."):
     docs = load_analyst_docs(date_from, date_to, selected_brokers or None, max_docs)
     # st.write(f"[DEBUG] loaded={len(docs)}, broker_filter={sel_brokers or '(all)'}")
 
+last_updated = get_last_updated_from_docs(docs)
+st.markdown(f"최근 평가 반영 시각(문서 기준): {format_ts(last_updated)}")
 
 # Rank table (shown immediately)
 st.subheader("🏆 Top Analysts")
