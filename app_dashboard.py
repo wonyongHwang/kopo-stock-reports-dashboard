@@ -378,10 +378,10 @@ st.title("📊 종목리포트 평가 랭킹보드")
 st.markdown("---")
 st.markdown(
     """
-    ⚠️ **면책 조항 (Disclaimer)**  
-    본 사이트는 **한국폴리텍대학 스마트금융과 학생들의 실습 목적**으로 제작된 것입니다.  
-    따라서 제공되는 데이터와 랭킹은 오류가 있을 수 있으며, 어떠한 공신력도 갖지 않습니다.  
-    또한, 본 사이트의 정보를 기반으로 한 **투자 결정 및 그 결과에 대한 책임은 전적으로 이용자 본인에게** 있습니다.  
+    ⚠️ **면책 조항 (Disclaimer)**
+    본 사이트는 **한국폴리텍대학 스마트금융과 학생들의 실습 목적**으로 제작된 것입니다.
+    따라서 제공되는 데이터와 랭킹은 오류가 있을 수 있으며, 어떠한 공신력도 갖지 않습니다.
+    또한, 본 사이트의 정보를 기반으로 한 **투자 결정 및 그 결과에 대한 책임은 전적으로 이용자 본인에게** 있습니다.
     제작자는 투자 손실 등 어떠한 법적 책임도 지지 않습니다.
     """,
     unsafe_allow_html=True
@@ -476,26 +476,34 @@ st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
 # Pick one analyst
 st.markdown("---")
-st.subheader("🔍 Evidence of Selected Analyst")
+st.subheader("🔍 애널리스트 클릭시 화면 하단에 상세 평가표 조회 가능")
 
-# 선택 셀 UI
-labels = ["(select)"] + [f"{row.Analyst} / {row.Broker}  · score {row.RankScore} · reports {row.Reports}" for _, row in show_df.iterrows()]
-choice = st.selectbox("Select a row", labels)
+# 3열 버튼 UI (이름 + 점수), 클릭 시 아래에 상세 표를 인라인으로 표시
+if "picked_row_idx" not in st.session_state:
+    st.session_state.picked_row_idx = None
 
-if choice == "(select)":
+_tmp_df_btn = show_df.reset_index(drop=True).copy()
+n_cols = 3
+cols = st.columns(n_cols)
+for i, row in _tmp_df_btn.iterrows():
+    with cols[i % n_cols]:
+        btn_label = f"{row.get('Analyst', 'Unknown')} · {row.get('RankScore', '-')}"
+        if st.button(btn_label, key=f"pick_{page}_{i}", use_container_width=True):
+            st.session_state.picked_row_idx = i
+
+# 선택이 없으면 중단
+if st.session_state.picked_row_idx is None:
     st.stop()
 
 # 선택된 애널리스트 파싱
-idx = labels.index(choice) - 1
-picked = show_df.iloc[idx]
-picked_name = picked["Analyst"]
-picked_broker = picked["Broker"]
+picked = _tmp_df_btn.iloc[st.session_state.picked_row_idx]
+picked_name = picked.get("Analyst", "Unknown Analyst")
+picked_broker = picked.get("Broker", "Unknown Broker")
 
 st.markdown(f"### {picked_name} — {picked_broker}")
-st.write(f"**Reports:** {picked['Reports']} | **RankScore:** {picked['RankScore']}")
-st.write(f"**Coverage:** {picked['FirstReport']} → {picked['LastReport']}")
+st.write(f"**Reports:** {picked.get('Reports', '-') } | **RankScore:** {picked.get('RankScore', '-') }")
+st.write(f"**Coverage:** {picked.get('FirstReport', '-') } → {picked.get('LastReport', '-') }")
 
-# 상세 로드
 with st.spinner("Loading evidence..."):
     items = load_detail_for_analyst(picked_name, picked_broker, date_from, date_to)
 
