@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Analyst Ranking & Evidence Dashboard (Horizon-only)
@@ -453,6 +452,22 @@ with st.spinner("Loading analyst documents..."):
 
 last_updated = get_last_updated_from_docs(docs)
 st.markdown(f"최근 평가 반영 시각(문서 기준): {format_ts(last_updated)}")
+
+# 추가된 코드
+# --- 평가 반영 기간(리포트 날짜 범위) 표시 ---
+try:
+    # docs에서 report_date 문자열만 추출하여 유효한 것들만 필터
+    _date_vals = [str(d.get("report_date", "")).strip() for d in docs]
+    _date_vals = [s for s in _date_vals if s and len(s) >= 8]  # 대략 'YYYY-MM-DD' 형태
+    if _date_vals:
+        _min_date = min(_date_vals)
+        _max_date = max(_date_vals)
+        st.markdown(f"평가 반영 기간 {_min_date} ~ {_max_date}")
+    else:
+        st.markdown("평가 반영 기간 - ~ -")
+except Exception:
+    st.markdown("평가 반영 기간 - ~ -")
+# --- End ---
 
 # Rank table (shown immediately)
 st.subheader("🏆 Top Analysts")
