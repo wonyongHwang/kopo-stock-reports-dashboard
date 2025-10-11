@@ -4,11 +4,12 @@ Analyst Ranking & Evidence Dashboard (Horizon-only)
 - 상단 Top Analysts: 행 클릭(체크박스 없이)으로 선택 → 하단에 상세 근거표 표시
 - 30/60일 성과 섹션 제거 (요청사항)
 - Firestore 구조는 evaluations/by_analyst 저장 스키마에 맞춤
+- 브로커명 정규화(공백 제거 등) 저장·조회 전 구간에 적용
 """
 
 import math
 import datetime as dt
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import streamlit as st
 import pandas as pd
@@ -17,21 +18,18 @@ import pytz
 from google.cloud import firestore
 from st_aggrid import DataReturnMode
 
-
-# ====== 선택 UI: streamlit-aggrid 유무에 따른 분기 ======
-_AGGRID_AVAILABLE = True
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-except Exception:
-    _AGGRID_AVAILABLE = False
+import re
 
 # -----------------------------
-# 전역/헬퍼
+# 정규화 & 유틸
 # -----------------------------
-EXCLUDED_BROKERS = {"한국IR협의회"}  # 제외할 증권사명 집합
-
-def is_allowed_broker(broker: str) -> bool:
-    return broker not in EXCLUDED_BROKERS
+def normalize_broker_name(name: str) -> str:
+    """브로커명 공백/특수문자 제거, 표준화"""
+    if not name:
+        return ""
+    name = re.sub(r"\s+", "", name)           # 모든 공백 제거
+    name = re.sub(r"[\(\)\[\]]", "", name)    # 괄호류 제거
+    return name.strip()
 
 def _norm_url(x: str) -> str:
     if not x:
@@ -71,12 +69,27 @@ def _extract_selected_idx_from_aggrid(grid_ret) -> int | None:
         if not sel:
             return None
         row0 = sel[0]
-        # dict or pandas Series 모두 대응
         try:
             return int(row0.get("_row"))
         except AttributeError:
             return int(row0["_row"])
     return None
+
+# ====== 선택 UI: streamlit-aggrid 유무에 따른 분기 ======
+_AGGRID_AVAILABLE = True
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+except Exception:
+    _AGGRID_AVAILABLE = False
+
+# -----------------------------
+# 전역/헬퍼
+# -----------------------------
+EXCLUDED_BROKERS = {"한국IR협의회"}  # 제외할 증권사명 집합
+
+def is_allowed_broker(broker: str) -> bool:
+    # 비교도 정규화값으로
+    return normalize_broker_name(broker) not in {normalize_broker_name(b) for b in EXCLUDED_BROKERS}
 
 # -----------------------------
 # Firestore Client & Caches
@@ -87,13 +100,15 @@ def get_db():
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_broker_list() -> List[str]:
+    """by_analyst에서 broker만 모아 정규화 후 유니크 반환"""
     db = get_db()
-    q = db.collection_group("by_analyst").select(["broker"]).limit(3000)
+    q = db.collection_group("by_analyst").select(["broker"]).limit(5000)
     s = set()
     try:
         for d in q.stream():
             b = (d.to_dict() or {}).get("broker")
-            if b:
+            b = normalize_broker_name(b)
+            if b and is_allowed_broker(b):
                 s.add(b)
     except Exception:
         pass
@@ -105,6 +120,7 @@ def load_analyst_docs(min_date: dt.date | None, max_date: dt.date | None,
                       limit: int = 3000) -> List[Dict[str, Any]]:
     """
     by_analyst 문서 로드 (필요한 필터만 서버 측 where, 나머지는 클라이언트 필터)
+    brokers: 정규화된 이름 리스트를 기대
     """
     db = get_db()
     q = db.collection_group("by_analyst")
@@ -119,14 +135,20 @@ def load_analyst_docs(min_date: dt.date | None, max_date: dt.date | None,
         docs = list(q.stream())
 
     out: List[Dict[str, Any]] = []
-    broker_set = set(brokers or [])
+    broker_set = {normalize_broker_name(b) for b in (brokers or [])} or None
     for d in docs:
         x = d.to_dict() or {}
-        broker = (x.get("broker") or "").strip()
-        if not is_allowed_broker(broker):
-            continue   # 제외
-        if broker_set and (x.get("broker") or "") not in broker_set:
+        # 정규화
+        broker_raw = (x.get("broker") or "").strip()
+        broker_norm = normalize_broker_name(broker_raw)
+        # 제외
+        if not is_allowed_broker(broker_norm):
             continue
+        # 선택 필터
+        if broker_set and broker_norm not in broker_set:
+            continue
+
+        x["broker"] = broker_norm   # 정규화값으로 통일
         # 구형 호환: points_total 없으면 horizon 합으로 대체
         if x.get("points_total") is None and x.get("horizons"):
             x["points_total"] = sum(float(h.get("points_total_this_horizon") or 0.0) for h in x.get("horizons") or [])
@@ -139,22 +161,48 @@ def load_detail_for_analyst(analyst_name: str, broker: str,
                             limit: int = 800) -> List[Dict[str, Any]]:
     """
     특정 애널리스트(이름+브로커)의 by_analyst 문서 목록 로드
+    - 정규화된 broker로 1차 조회
+    - (과거데이터 호환) 정규화 전 broker가 다르면 2차 조회 후 병합
     """
     db = get_db()
     out: List[Dict[str, Any]] = []
-    q = (db.collection_group("by_analyst")
-           .where("broker", "==", broker)
-           .where("analyst_name", "==", analyst_name))
-    try:
-        if date_from: q = q.where("report_date", ">=", date_from.isoformat())
-        if date_to:   q = q.where("report_date", "<=", date_to.isoformat())
-    except Exception:
-        pass
-    q = q.limit(limit)
-    for d in q.stream():
-        out.append(d.to_dict() or {})
-    out.sort(key=lambda r: r.get("report_date",""), reverse=True)
-    return out
+
+    broker_norm = normalize_broker_name(broker)
+
+    def _query(b: str) -> List[Dict[str, Any]]:
+        q = (db.collection_group("by_analyst")
+               .where("broker", "==", normalize_broker_name(b))
+               .where("analyst_name", "==", analyst_name))
+        try:
+            if date_from: q = q.where("report_date", ">=", date_from.isoformat())
+            if date_to:   q = q.where("report_date", "<=", date_to.isoformat())
+        except Exception:
+            pass
+        q = q.limit(limit)
+        docs = [z.to_dict() or {} for z in q.stream()]
+        # 브로커 정규화 보정
+        for z in docs:
+            z["broker"] = normalize_broker_name(z.get("broker"))
+        return docs
+
+    # 1차: 정규화 값으로
+    out.extend(_query(broker_norm))
+    # 2차: 비정규화가 다를 경우(과거 문서 호환)
+    if broker != broker_norm:
+        out.extend(_query(broker))  # 중복 가능
+
+    # 중복 제거(report_id, pdf_url 기준 우선)
+    seen: set[Tuple[str, str]] = set()
+    uniq: List[Dict[str, Any]] = []
+    for r in out:
+        key = (str(r.get("report_id","")), str(r.get("pdf_url","")))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(r)
+
+    uniq.sort(key=lambda r: r.get("report_date",""), reverse=True)
+    return uniq
 
 # -----------------------------
 # Helpers (표현/집계)
@@ -275,7 +323,7 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
     # 집계
     for x in docs:
         name = (x.get("analyst_name") or "").strip() or "(unknown)"
-        broker = (x.get("broker") or "").strip()
+        broker = normalize_broker_name((x.get("broker") or "").strip())
         try:
             pts = float(x.get("points_total") or 0.0)
         except Exception:
@@ -366,14 +414,15 @@ with st.sidebar:
 
     # 기간 기준으로 문서 로드 → 이용 가능한 브로커 집합/건수 계산
     base_docs = load_analyst_docs(date_from, date_to, brokers=None, limit=max_docs)
+
     broker_counts = {}
     for d in base_docs:
-        b = (d.get("broker") or "").strip()
+        b = normalize_broker_name((d.get("broker") or "").strip())
         if not b:
             continue
         broker_counts[b] = broker_counts.get(b, 0) + 1
 
-    # 이용 가능한 브로커만 (건수>0) 정렬
+    # 이용 가능한 브로커만 (건수>0) 정렬 (정규화값)
     available_brokers = sorted([b for b, c in broker_counts.items() if c > 0])
 
     st.markdown("### 증권사 선택 (괄호안은 리포트 건수)")
@@ -452,11 +501,11 @@ if _AGGRID_AVAILABLE and not _show_df.empty:
         _show_df,
         gridOptions=gb.build(),
         update_mode=GridUpdateMode.SELECTION_CHANGED,
-        data_return_mode=DataReturnMode.AS_INPUT,  # 또는 FILTERED/AS_IS 중 환경에 맞게
+        data_return_mode=DataReturnMode.AS_INPUT,
         theme="streamlit",
         allow_unsafe_jscode=True,
-        fit_columns_on_grid_load=True,
         height=min(600, 45 * len(_show_df) + 120),
+        fit_columns_on_grid_load=True,
     )
 
     selected_idx = _extract_selected_idx_from_aggrid(grid)
