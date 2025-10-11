@@ -5,4 +5,5 @@ pandas
 google-cloud-firestore
 google-auth
 streamlit
+streamlit-aggrid
 pyngrok==4.1.1
