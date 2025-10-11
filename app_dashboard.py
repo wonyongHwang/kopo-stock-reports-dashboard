@@ -1,39 +1,45 @@
 # -*- coding: utf-8 -*-
 """
 Analyst Ranking & Evidence Dashboard (Horizon-only)
-- 상위 랭커를 바로 보여주고, 클릭 시 근거(리포트 URL/예측가/포지션/실제 성과)를 테이블로 노출
-- 30/60일 성과 섹션은 제거 (요청사항)
+- 상단 Top Analysts: 행 클릭(체크박스 없이)으로 선택 → 하단에 상세 근거표 표시
+- 30/60일 성과 섹션 제거 (요청사항)
 - Firestore 구조는 evaluations/by_analyst 저장 스키마에 맞춤
 """
 
 import math
 import datetime as dt
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 import streamlit as st
 import pandas as pd
-import datetime as dt
 import pytz
 
 from google.cloud import firestore
+from st_aggrid import DataReturnMode
 
-# app_dashboard.py 상단에 전역 설정 추가
+
+# ====== 선택 UI: streamlit-aggrid 유무에 따른 분기 ======
+_AGGRID_AVAILABLE = True
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+except Exception:
+    _AGGRID_AVAILABLE = False
+
+# -----------------------------
+# 전역/헬퍼
+# -----------------------------
 EXCLUDED_BROKERS = {"한국IR협의회"}  # 제외할 증권사명 집합
 
 def is_allowed_broker(broker: str) -> bool:
     return broker not in EXCLUDED_BROKERS
 
-# 파일 상단 헬퍼들 근처에 추가
 def _norm_url(x: str) -> str:
     if not x:
         return ""
     s = str(x).strip()
     if s.startswith(("http://", "https://")):
         return s
-    # 스킴이 없으면 기본 https 가정
     return "https://" + s
-
-
 
 KST = pytz.timezone("Asia/Seoul")
 
@@ -42,10 +48,8 @@ def format_ts(ts, tz=KST):
     if not ts:
         return "-"
     try:
-        # Firestore Timestamp -> datetime
         dt_utc = ts if isinstance(ts, dt.datetime) else ts.to_datetime()
     except Exception:
-        # '2025-09-05' 같은 문자열일 수도 있음
         try:
             dt_utc = dt.datetime.fromisoformat(str(ts))
         except Exception:
@@ -53,16 +57,36 @@ def format_ts(ts, tz=KST):
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=dt.timezone.utc)
     return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-# ===============================
+
+# --- (추가) 선택 행 인덱스 안전 추출 헬퍼 ---
+def _extract_selected_idx_from_aggrid(grid_ret) -> int | None:
+    sel = grid_ret.get("selected_rows", [])
+    # DataFrame 케이스
+    if isinstance(sel, pd.DataFrame):
+        if sel.empty:
+            return None
+        return int(sel.iloc[0]["_row"])
+    # list[dict] 케이스
+    if isinstance(sel, list):
+        if not sel:
+            return None
+        row0 = sel[0]
+        # dict or pandas Series 모두 대응
+        try:
+            return int(row0.get("_row"))
+        except AttributeError:
+            return int(row0["_row"])
+    return None
+
+# -----------------------------
 # Firestore Client & Caches
-# ===============================
+# -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_db():
     return firestore.Client()
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_broker_list() -> List[str]:
-    """by_analyst 그룹에서 broker 목록 추출"""
     db = get_db()
     q = db.collection_group("by_analyst").select(["broker"]).limit(3000)
     s = set()
@@ -100,7 +124,7 @@ def load_analyst_docs(min_date: dt.date | None, max_date: dt.date | None,
         x = d.to_dict() or {}
         broker = (x.get("broker") or "").strip()
         if not is_allowed_broker(broker):
-            continue   # ← 제외
+            continue   # 제외
         if broker_set and (x.get("broker") or "") not in broker_set:
             continue
         # 구형 호환: points_total 없으면 horizon 합으로 대체
@@ -132,15 +156,10 @@ def load_detail_for_analyst(analyst_name: str, broker: str,
     out.sort(key=lambda r: r.get("report_date",""), reverse=True)
     return out
 
-# ===============================
+# -----------------------------
 # Helpers (표현/집계)
-# ===============================
-# (상단 helpers 근처에 추가)
+# -----------------------------
 def _price_stats(price_sample: list[dict]) -> tuple[float|None, float|None, float|None]:
-    """
-    price_sample: [{"date": "...", "open":.., "high":.., "low":.., "close":..}, ...]
-    return: (max_close, min_close, last_close)
-    """
     if not price_sample:
         return None, None, None
     closes = [float(p.get("close")) for p in price_sample if p.get("close") is not None]
@@ -175,12 +194,9 @@ def format_pos_label(desired: int | None, rating_norm: str | None) -> str:
     if desired == -1 or r == "sell": return "하락(sell)"
     return "중립(hold)"
 
-# 기존 horizon_to_rows 를 아래로 교체
 def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     by_analyst 한 문서(= 한 리포트) → 여러 horizon 근거 행으로 펼침
-    - 기존 return_pct (= start_close 대비 end_close 변화율)
-    - 추가: 목표가 대비 수익률% (= (end_close - target_price)/target_price )
     """
     rows = []
     horizons = rec.get("horizons") or []
@@ -227,7 +243,7 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             # 기존 수익률 (리포트 시작 대비)
             "리포트일에 매수했을경우 수익률%": None if ret is None else round(ret*100, 3),
 
-            # 신규: 목표가 대비
+            # 목표가 대비
             "목표가대비수익률%": target_return_pct,
             "목표가대비최대도달%": max_reach_pct,
 
@@ -249,59 +265,14 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
     return rows
 
-
-
-# def make_rank_table(docs: List[Dict[str, Any]],
-#                     metric: str = "avg", min_reports: int = 2) -> pd.DataFrame:
-#     """
-#     애널리스트별 집계 → 랭킹표 생성
-#     metric: "avg" | "sum"
-#     """
-#     from collections import defaultdict
-#     agg = defaultdict(lambda: {"sum":0.0, "n":0, "name":"", "broker":"", "first":None, "last":None})
-#     for x in docs:
-#         name = normalize_name(x.get("analyst_name","")) or "(unknown)"
-#         broker = x.get("broker","")
-#         pts = float(x.get("points_total") or 0.0)
-#         rdate = x.get("report_date","")
-
-#         key = f"{name}|{broker}"
-#         agg[key]["sum"] += pts
-#         agg[key]["n"] += 1
-#         agg[key]["name"] = name
-#         agg[key]["broker"] = broker
-#         if rdate:
-#             if not agg[key]["first"] or rdate < agg[key]["first"]:
-#                 agg[key]["first"] = rdate
-#             if not agg[key]["last"]  or rdate > agg[key]["last"]:
-#                 agg[key]["last"]  = rdate
-
-#     rows = []
-#     for k,v in agg.items():
-#         if v["n"] < min_reports:  # 최소 리포트 수
-#             continue
-#         score = (v["sum"]/v["n"]) if metric=="avg" else v["sum"]
-#         rows.append({
-#             "RankScore": round(score,4),
-#             "Reports": v["n"],
-#             "Analyst": v["name"],
-#             "Broker": v["broker"],
-#             "FirstReport": v["first"] or "",
-#             "LastReport": v["last"] or "",
-#         })
-#     df = pd.DataFrame(rows).sort_values(["RankScore","Reports"], ascending=[False, False]).reset_index(drop=True)
-#     df.index = df.index + 1  # 1-based rank
-#     return df
-
 def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2) -> pd.DataFrame:
     from collections import defaultdict
     agg = defaultdict(lambda: {"sum":0.0, "n":0, "name":"", "broker":"", "first":None, "last":None})
 
-    # 0) 입력이 비면 즉시 빈 DF 반환
     if not docs:
         return pd.DataFrame(columns=["RankScore","Reports","Analyst","Broker","FirstReport","LastReport"])
 
-    # 1) 집계
+    # 집계
     for x in docs:
         name = (x.get("analyst_name") or "").strip() or "(unknown)"
         broker = (x.get("broker") or "").strip()
@@ -322,9 +293,8 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
             if not agg[key]["last"] or rdate > agg[key]["last"]:
                 agg[key]["last"]  = rdate
 
-    # 2) 순위행 생성
     rows = []
-    for k, v in agg.items():
+    for _, v in agg.items():
         if v["n"] < min_reports:
             continue
         score = (v["sum"]/v["n"]) if metric == "avg" else v["sum"]
@@ -337,15 +307,12 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
             "LastReport": v["last"] or "",
         })
 
-    # 3) rows가 비면 안전하게 빈 DF 반환 (정렬 시 KeyError 방지)
     if not rows:
         return pd.DataFrame(columns=["RankScore","Reports","Analyst","Broker","FirstReport","LastReport"])
 
     df = pd.DataFrame(rows)
-    # 4) 혹시라도 컬럼 누락 시 방어
     if not {"RankScore","Reports"}.issubset(df.columns):
         return df.reset_index(drop=True)
-
     return df.sort_values(["RankScore","Reports"], ascending=[False, False]).reset_index(drop=True)
 
 def get_last_updated_from_docs(docs):
@@ -354,11 +321,9 @@ def get_last_updated_from_docs(docs):
         ts = d.get("updated_at")
         if ts is None:
             continue
-        # Firestore Timestamp 비교
         try:
             t = ts if isinstance(ts, dt.datetime) else ts.to_datetime()
         except Exception:
-            # 문자열일 수도 있음
             try:
                 t = dt.datetime.fromisoformat(str(ts))
             except Exception:
@@ -367,9 +332,9 @@ def get_last_updated_from_docs(docs):
             latest = t
     return latest
 
-# ===============================
+# -----------------------------
 # Streamlit UI
-# ===============================
+# -----------------------------
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 평가 랭킹보드")
 
@@ -386,20 +351,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Sidebar Filters
-# with st.sidebar:
-#     st.header("Filters")
-#     today = dt.date.today()
-#     default_from = today - dt.timedelta(days=365)
-#     date_from = st.date_input("From date", value=default_from)
-#     date_to = st.date_input("To date", value=today)
-#     brokers = load_broker_list()
-#     sel_brokers = st.multiselect("Brokers", brokers, default=[])
-#     metric = st.radio("Ranking metric", ["avg", "sum"], index=0, horizontal=True)
-#     min_reports = st.slider("Minimum reports", 1, 20, 2, 1)
-#     max_docs = st.slider("Max docs to scan (by_analyst)", 500, 5000, 3000, 100)
-#     st.caption("※ 기간/브로커를 좁힐수록 빠릅니다. 점수는 리포트별 points_total 합계(또는 평균)를 사용합니다.")
-# ---- 기존 사이드바 일부 교체 ----
+# ---- 사이드바 ----
 with st.sidebar:
     st.header("Filters")
     today = dt.date.today()
@@ -412,7 +364,7 @@ with st.sidebar:
     max_docs = st.slider("Max docs to scan (by_analyst)", 500, 5000, 3000, 100)
     st.caption("※ 기간/브로커를 좁힐수록 빠릅니다. 점수는 리포트별 points_total 합계(또는 평균)를 사용합니다.")
 
-    # ➊ 먼저 기간 기준으로만 문서 로드 → 이용 가능한 브로커 집합/건수 계산
+    # 기간 기준으로 문서 로드 → 이용 가능한 브로커 집합/건수 계산
     base_docs = load_analyst_docs(date_from, date_to, brokers=None, limit=max_docs)
     broker_counts = {}
     for d in base_docs:
@@ -431,34 +383,26 @@ with st.sidebar:
     else:
         # 전체 선택 토글
         select_all = st.checkbox("전체 선택", value=True, key="brokers_select_all")
-
-        # ➋ 체크박스 렌더: (이 기간에 리포트 있는 브로커만) 라벨에 건수 표기
         selected_brokers = []
         for b in available_brokers:
             label = f"{b} ({broker_counts.get(b, 0)})"
             checked = st.checkbox(label, value=select_all, key=f"broker_{b}")
             if checked:
                 selected_brokers.append(b)
-
-        # 아무 것도 선택 안되면 경고 (집계는 빈 결과가 되므로)
         if not selected_brokers:
             st.warning("선택된 증권사가 없습니다. 최소 1개 이상 선택해 주세요.")
 
-# Load
+# ---- 데이터 로드 ----
 with st.spinner("Loading analyst documents..."):
-    # docs = load_analyst_docs(date_from, date_to, sel_brokers or None, max_docs)
     docs = load_analyst_docs(date_from, date_to, selected_brokers or None, max_docs)
-    # st.write(f"[DEBUG] loaded={len(docs)}, broker_filter={sel_brokers or '(all)'}")
 
 last_updated = get_last_updated_from_docs(docs)
 st.markdown(f"최근 평가 반영 시각(문서 기준): {format_ts(last_updated)}")
 
-# 추가된 코드
-# --- 평가 반영 기간(리포트 날짜 범위) 표시 ---
+# 평가 반영 기간 표시
 try:
-    # docs에서 report_date 문자열만 추출하여 유효한 것들만 필터
     _date_vals = [str(d.get("report_date", "")).strip() for d in docs]
-    _date_vals = [s for s in _date_vals if s and len(s) >= 8]  # 대략 'YYYY-MM-DD' 형태
+    _date_vals = [s for s in _date_vals if s and len(s) >= 8]
     if _date_vals:
         _min_date = min(_date_vals)
         _max_date = max(_date_vals)
@@ -467,9 +411,8 @@ try:
         st.markdown("평가 반영 기간 - ~ -")
 except Exception:
     st.markdown("평가 반영 기간 - ~ -")
-# --- End ---
 
-# Rank table (shown immediately)
+# ---- 상단: Top Analysts (페이지네이션 그대로) ----
 st.subheader("🏆 Top Analysts")
 rank_df = make_rank_table(docs, metric=metric, min_reports=min_reports)
 st.write(f"[DEBUG] after min_reports=1 -> candidates={len(rank_df)} (현재 설정 min_reports={min_reports})")
@@ -478,7 +421,6 @@ if rank_df.empty:
     st.info("조건에 맞는 데이터가 없습니다. 기간/브로커 필터를 조정하세요.")
     st.stop()
 
-# 페이지네이션 (간단)
 per_page = st.selectbox("Rows per page", [10,25,50,100], 1)
 page = st.number_input("Page", 1, 9999, 1)
 total_pages = max(1, math.ceil(len(rank_df)/per_page))
@@ -486,32 +428,60 @@ page = min(page, total_pages)
 start, end = (page-1)*per_page, (page-1)*per_page + per_page
 show_df = rank_df.iloc[start:end].copy()
 
-st.dataframe(show_df, use_container_width=True)
 st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
-# Pick one analyst
 st.markdown("---")
-st.subheader("🔍 애널리스트 클릭시 화면 하단에 상세 평가표 조회 가능")
+st.subheader("🔍 하단 상세: 상단 표에서 행을 클릭하면 자동으로 표시됩니다")
 
-# 3열 버튼 UI (이름 + 점수), 클릭 시 아래에 상세 표를 인라인으로 표시
-if "picked_row_idx" not in st.session_state:
-    st.session_state.picked_row_idx = None
+# ---- 핵심: 행 선택 UI (Ag-Grid) ----
+selected_idx = None
+_show_df = show_df.reset_index(drop=True).copy()
 
-_tmp_df_btn = show_df.reset_index(drop=True).copy()
-n_cols = 3
-cols = st.columns(n_cols)
-for i, row in _tmp_df_btn.iterrows():
-    with cols[i % n_cols]:
-        btn_label = f"{row.get('Analyst', 'Unknown')} · {row.get('RankScore', '-')}"
-        if st.button(btn_label, key=f"pick_{page}_{i}", use_container_width=True):
-            st.session_state.picked_row_idx = i
+if _AGGRID_AVAILABLE and not _show_df.empty:
+    # 내부 키 삽입(선택 결과 매핑용) — 화면에는 숨김
+    _show_df.insert(0, "_row", _show_df.index)
 
-# 선택이 없으면 중단
-if st.session_state.picked_row_idx is None:
+    gb = GridOptionsBuilder.from_dataframe(_show_df)
+    # ✅ 체크박스 제거 + 행 아무 곳이나 클릭으로 '단일 선택'
+    gb.configure_selection(selection_mode="single", use_checkbox=False)
+    # UX 옵션
+    gb.configure_grid_options(domLayout="autoHeight")
+    gb.configure_column("_row", header_name="", hide=True)
+
+    grid = AgGrid(
+        _show_df,
+        gridOptions=gb.build(),
+        update_mode=GridUpdateMode.SELECTION_CHANGED,
+        data_return_mode=DataReturnMode.AS_INPUT,  # 또는 FILTERED/AS_IS 중 환경에 맞게
+        theme="streamlit",
+        allow_unsafe_jscode=True,
+        fit_columns_on_grid_load=True,
+        height=min(600, 45 * len(_show_df) + 120),
+    )
+
+    selected_idx = _extract_selected_idx_from_aggrid(grid)
+
+else:
+    # ---- Fallback: st.dataframe + 드롭다운 선택 ----
+    st.info("고급 행 클릭 선택을 위해 `streamlit-aggrid` 설치를 권장합니다. (fallback UI 사용 중)")
+    st.dataframe(_show_df.drop(columns=["_row"], errors="ignore") if "_row" in _show_df else _show_df,
+                 use_container_width=True)
+    options = [f"{i}: {row['Analyst']} — {row['Broker']} (RankScore={row['RankScore']})"
+               for i, row in _show_df.iterrows()]
+    if options:
+        pick_label = st.selectbox("상세를 볼 행 선택 (대체 UI)", options, index=0)
+        try:
+            selected_idx = int(pick_label.split(":")[0])
+        except Exception:
+            selected_idx = 0
+
+# ---- 선택 없으면 안내 ----
+if selected_idx is None:
+    st.info("상단 표에서 행을 클릭(선택)하세요.")
     st.stop()
 
-# 선택된 애널리스트 파싱
-picked = _tmp_df_btn.iloc[st.session_state.picked_row_idx]
+# ---- 선택된 애널리스트 정보 표시 + 상세 근거표 ----
+picked = _show_df.iloc[selected_idx]
 picked_name = picked.get("Analyst", "Unknown Analyst")
 picked_broker = picked.get("Broker", "Unknown Broker")
 
@@ -537,16 +507,13 @@ else:
     ev_df = pd.DataFrame(evidence_rows)
 
     # 보기 좋게 컬럼 순서 재배치
-    # 근거표를 렌더하는 부분에서 ev_df 생성 후 정렬 컬럼 지정하는 리스트 갱신
     wanted_cols = [
-    "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
-    "horizon(일)",
-
-    # 비교용 신규 지표
-    "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
-
-    "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
-    "리포트총점", "제목", "리포트PDF", "상세페이지"]
+        "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
+        "horizon(일)",
+        "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
+        "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
+        "리포트총점", "제목", "리포트PDF", "상세페이지"
+    ]
     cols = [c for c in wanted_cols if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted_cols]
     ev_df = ev_df[cols]
 
@@ -556,7 +523,7 @@ else:
     if "상세페이지" in ev_df.columns:
         ev_df["상세페이지"] = ev_df["상세페이지"].map(_norm_url)
 
-    # Streamlit 1.23+ : LinkColumn 사용 (권장)
+    # Streamlit 최신 버전: LinkColumn 사용
     try:
         st.dataframe(
             ev_df,
@@ -575,7 +542,7 @@ else:
             },
         )
     except Exception:
-        # 구버전 Streamlit 대응: HTML 테이블로 폴백
+        # 구버전 폴백: HTML 테이블
         def _a(href):
             return f'<a href="{href}" target="_blank" rel="noopener noreferrer">열기</a>' if href else ""
         html_df = ev_df.copy()
@@ -584,14 +551,6 @@ else:
         if "상세페이지" in html_df.columns:
             html_df["상세페이지"] = html_df["상세페이지"].map(_a)
 
-        st.markdown(
-            html_df.to_html(escape=False, index=False),
-            unsafe_allow_html=True
-        )
+        st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-    # st.caption("※ 링크 컬럼을 클릭하면 새 탭으로 열립니다.")
-
-
-    # 링크 컬럼은 클릭 가능하게 렌더
-    # st.dataframe(ev_df, use_container_width=True)
     st.caption("※ 한국폴리텍대학 스마트금융과 실습 목적의 결과물로 데이터 취합, 정제, 분석이 부정확 할 수 있음.")
