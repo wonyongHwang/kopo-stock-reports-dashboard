@@ -87,6 +87,41 @@ except Exception:
 # -----------------------------
 EXCLUDED_BROKERS = {"한국IR협의회"}  # 제외할 증권사명 집합
 
+def _parse_report_date(val) -> dt.date | None:
+    """report_date가 문자열/타임스탬프/None 등 섞여 있어도 안전하게 date로 변환"""
+    try:
+        if hasattr(val, "to_datetime"):
+            val = val.to_datetime()
+        if isinstance(val, dt.datetime):
+            return val.date()
+        s = (str(val) or "").strip()
+        if not s:
+            return None
+        # 우선 ISO yyyy-mm-dd 우선
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            return dt.date.fromisoformat(s)
+        # 느슨한 포맷도 수용
+        return dt.date.fromisoformat(pd.to_datetime(s).date().isoformat())
+    except Exception:
+        return None
+
+def filter_docs_by_date(docs: list[dict], date_from: dt.date | None, date_to: dt.date | None) -> list[dict]:
+    """report_date 기준으로 한 번 더 클라이언트 필터(랭킹 전용 안전장치)"""
+    if not (date_from or date_to):
+        return docs
+    out = []
+    for x in docs:
+        d = _parse_report_date(x.get("report_date"))
+        if d is None:
+            continue
+        if date_from and d < date_from:
+            continue
+        if date_to and d > date_to:
+            continue
+        out.append(x)
+    return out
+
+
 def is_allowed_broker(broker: str) -> bool:
     # 비교도 정규화값으로
     return normalize_broker_name(broker) not in {normalize_broker_name(b) for b in EXCLUDED_BROKERS}
@@ -473,8 +508,15 @@ except Exception:
 
 # ---- 상단: Top Analysts (페이지네이션 그대로) ----
 st.subheader("🏆 Top Analysts")
-rank_df = make_rank_table(docs, metric=metric, min_reports=min_reports)
-st.write(f"[DEBUG] after min_reports=1 -> candidates={len(rank_df)} (현재 설정 min_reports={min_reports})")
+
+# 👇 랭킹 집계용으로 한 번 더 확실하게 날짜 필터 강제
+docs_for_rank = filter_docs_by_date(docs, date_from, date_to)
+
+# 디버그: 필터 전/후 건수 확인
+st.caption(f"[DEBUG] ranking docs: before={len(docs)} after_date_filter={len(docs_for_rank)}")
+
+rank_df = make_rank_table(docs_for_rank, metric=metric, min_reports=min_reports)
+
 
 if rank_df.empty:
     st.info("조건에 맞는 데이터가 없습니다. 기간/브로커 필터를 조정하세요.")
