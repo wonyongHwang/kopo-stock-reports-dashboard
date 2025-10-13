@@ -414,7 +414,6 @@ with st.sidebar:
 
     # 기간 기준으로 문서 로드 → 이용 가능한 브로커 집합/건수 계산
     base_docs = load_analyst_docs(date_from, date_to, brokers=None, limit=max_docs)
-
     broker_counts = {}
     for d in base_docs:
         b = normalize_broker_name((d.get("broker") or "").strip())
@@ -422,24 +421,35 @@ with st.sidebar:
             continue
         broker_counts[b] = broker_counts.get(b, 0) + 1
 
-    # 이용 가능한 브로커만 (건수>0) 정렬 (정규화값)
     available_brokers = sorted([b for b, c in broker_counts.items() if c > 0])
 
-    st.markdown("### 증권사 선택 (괄호안은 리포트 건수)")
+    st.markdown("### 증권사 선택")
+
     if not available_brokers:
         st.info("해당 기간에 리포트가 존재하는 증권사가 없습니다. 기간을 조정해 주세요.")
         selected_brokers = []
     else:
-        # 전체 선택 토글
-        select_all = st.checkbox("전체 선택", value=True, key="brokers_select_all")
-        selected_brokers = []
-        for b in available_brokers:
-            label = f"{b} ({broker_counts.get(b, 0)})"
-            checked = st.checkbox(label, value=select_all, key=f"broker_{b}")
-            if checked:
-                selected_brokers.append(b)
+        # 표시용 라벨: "증권사명 (리포트수)"
+        display_labels = [f"{b} ({broker_counts[b]})" for b in available_brokers]
+        # 기본 선택: 전체 선택 상태
+        default_selection = display_labels
+
+        # 멀티 셀렉트 UI
+        selected_labels = st.multiselect(
+            "리포트가 존재하는 증권사 목록",
+            options=display_labels,
+            default=default_selection,
+            help="Ctrl/Cmd 클릭으로 다중 선택, 전체 선택 또는 해제 가능"
+        )
+
+        # 선택된 라벨에서 실제 broker 이름만 추출
+        selected_brokers = [
+            b.split(" (")[0] for b in selected_labels if " (" in b
+        ]
+
         if not selected_brokers:
             st.warning("선택된 증권사가 없습니다. 최소 1개 이상 선택해 주세요.")
+
 
 # ---- 데이터 로드 ----
 with st.spinner("Loading analyst documents..."):
