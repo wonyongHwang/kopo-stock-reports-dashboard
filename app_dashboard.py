@@ -486,15 +486,28 @@ st.subheader("🔍 하단 상세: 상단 표에서 행을 클릭하면 자동으
 selected_idx = None
 _show_df = show_df.reset_index(drop=True).copy()
 
+# 행/헤더 높이 설정
+ROW_H = 34
+HEAD_H = 40
+PADDING = 32
+GRID_H = HEAD_H + ROW_H * len(_show_df) + PADDING   # 현재 페이지에 보여줄 행 수만큼
+# 25행이 모두 보이도록 충분히 키우되, 과도한 높이 방지
+GRID_H = min(GRID_H, HEAD_H + ROW_H * 25 + 400)      # 필요시 상단 상수 조절
+
 if _AGGRID_AVAILABLE and not _show_df.empty:
-    # 내부 키 삽입(선택 결과 매핑용) — 화면에는 숨김
     _show_df.insert(0, "_row", _show_df.index)
 
     gb = GridOptionsBuilder.from_dataframe(_show_df)
-    # ✅ 체크박스 제거 + 행 아무 곳이나 클릭으로 '단일 선택'
+    # ✅ 단일 선택 (체크박스 없음)
     gb.configure_selection(selection_mode="single", use_checkbox=False)
-    # UX 옵션
-    gb.configure_grid_options(domLayout="autoHeight")
+
+    # ❌ autoHeight 제거 (내부 스크롤 사용)
+    # gb.configure_grid_options(domLayout="autoHeight")
+    gb.configure_grid_options(
+        rowHeight=ROW_H,
+        headerHeight=HEAD_H,
+        # 필요시: suppressHorizontalScroll=True,
+    )
     gb.configure_column("_row", header_name="", hide=True)
 
     grid = AgGrid(
@@ -504,17 +517,17 @@ if _AGGRID_AVAILABLE and not _show_df.empty:
         data_return_mode=DataReturnMode.AS_INPUT,
         theme="streamlit",
         allow_unsafe_jscode=True,
-        height=min(600, 45 * len(_show_df) + 120),
         fit_columns_on_grid_load=True,
+        height=GRID_H,     # 🔷 per_page에 맞춘 충분한 높이
     )
 
     selected_idx = _extract_selected_idx_from_aggrid(grid)
 
 else:
-    # ---- Fallback: st.dataframe + 드롭다운 선택 ----
+    # ---- Fallback: st.dataframe + 드롭다운 선택 (동일 높이 적용) ----
     st.info("고급 행 클릭 선택을 위해 `streamlit-aggrid` 설치를 권장합니다. (fallback UI 사용 중)")
-    st.dataframe(_show_df.drop(columns=["_row"], errors="ignore") if "_row" in _show_df else _show_df,
-                 use_container_width=True)
+    df_to_show = _show_df.drop(columns=["_row"], errors="ignore") if "_row" in _show_df else _show_df
+    st.dataframe(df_to_show, use_container_width=True, height=GRID_H)  # 🔷 동일 높이
     options = [f"{i}: {row['Analyst']} — {row['Broker']} (RankScore={row['RankScore']})"
                for i, row in _show_df.iterrows()]
     if options:
@@ -523,6 +536,7 @@ else:
             selected_idx = int(pick_label.split(":")[0])
         except Exception:
             selected_idx = 0
+
 
 # ---- 선택 없으면 안내 ----
 if selected_idx is None:
