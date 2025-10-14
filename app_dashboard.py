@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 """
 Analyst Ranking & Evidence Dashboard (Horizon-only)
 - 상단 Top Analysts: 행 클릭(체크박스 없이)으로 선택 → 하단에 상세 근거표 표시
@@ -23,6 +24,15 @@ import re
 # -----------------------------
 # 정규화 & 유틸
 # -----------------------------
+
+def normalize_analyst_name(name: str) -> str:
+    """애널리스트명 공백 제거(중간 공백 포함) 표준화"""
+    if not name:
+        return ""
+    import re as _re
+    return _re.sub(r"\s+", "", str(name)).strip()
+
+
 def normalize_broker_name(name: str) -> str:
     """브로커명 공백/특수문자 제거, 표준화"""
     if not name:
@@ -120,8 +130,8 @@ def filter_docs_by_date(docs: list[dict], date_from: dt.date | None, date_to: dt
             continue
         out.append(x)
     return out
-
-
+    
+    
 def is_allowed_broker(broker: str) -> bool:
     # 비교도 정규화값으로
     return normalize_broker_name(broker) not in {normalize_broker_name(b) for b in EXCLUDED_BROKERS}
@@ -173,6 +183,8 @@ def load_analyst_docs(min_date: dt.date | None, max_date: dt.date | None,
     broker_set = {normalize_broker_name(b) for b in (brokers or [])} or None
     for d in docs:
         x = d.to_dict() or {}
+        # analyst 정규화 필드 보강
+        x['analyst_name_norm'] = x.get('analyst_name_norm') or normalize_analyst_name(x.get('analyst_name') or x.get('analyst') or '')
         # 정규화
         broker_raw = (x.get("broker") or "").strip()
         broker_norm = normalize_broker_name(broker_raw)
@@ -365,7 +377,8 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
             pts = 0.0
         rdate = (x.get("report_date") or "").strip()
 
-        key = f"{name}|{broker}"
+        name_norm = x.get('analyst_name_norm') or normalize_analyst_name((x.get('analyst_name') or x.get('analyst') or '').strip())
+        key = f"{name_norm}|{broker}"
         agg[key]["sum"] += pts
         agg[key]["n"] += 1
         agg[key]["name"] = name
@@ -483,7 +496,7 @@ with st.sidebar:
         ]
 
         if not selected_brokers:
-            st.warning("선택된 증권사가 없습니다. 최소 1개 이상 선택해 주세요.")
+            st.warning("선택된 증권사가 없을 경우 전체 증권사를 대상으로 집계합니다.")
 
 
 # ---- 데이터 로드 ----
