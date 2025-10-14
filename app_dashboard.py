@@ -32,6 +32,7 @@ def normalize_broker_name(name: str) -> str:
     if not name:
         return ""
     name = re.sub(r"\s+", "", name)           # 모든 공백 제거
+    name = re.sub(r"[&/\.#\[\]]", "_", name)  # Firestore 예약문자 치환
     name = re.sub(r"[\(\)\[\]]", "", name)    # 괄호류 제거
     return name.strip()
 
