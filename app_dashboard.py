@@ -396,10 +396,10 @@ with st.spinner("문서 로딩 중..."):
 st.markdown("---")
 st.markdown(
     """
-    ⚠️ **면책 조항 (Disclaimer)**  
-    본 사이트는 **한국폴리텍대학 스마트금융과 학생들의 실습 목적**으로 제작된 것입니다.  
-    따라서 제공되는 데이터와 랭킹은 오류가 있을 수 있으며, 어떠한 공신력도 갖지 않습니다.  
-    또한, 본 사이트의 정보를 기반으로 한 **투자 결정 및 그 결과에 대한 책임은 전적으로 이용자 본인**에게 있습니다.  
+    ⚠️ **면책 조항 (Disclaimer)**
+    본 사이트는 **한국폴리텍대학 스마트금융과 학생들의 실습 목적**으로 제작된 것입니다.
+    따라서 제공되는 데이터와 랭킹은 오류가 있을 수 있으며, 어떠한 공신력도 갖지 않습니다.
+    또한, 본 사이트의 정보를 기반으로 한 **투자 결정 및 그 결과에 대한 책임은 전적으로 이용자 본인**에게 있습니다.
     제작자는 투자 손실 등 어떠한 법적 책임도 지지 않습니다.
     """,
     unsafe_allow_html=True
@@ -536,6 +536,20 @@ with tab_rank:
 # ===============================
 # 탭2: 종목별 검색
 # ===============================
+# with tab_stock:
+#     st.subheader("🔎 종목별 리포트 조회")
+#     col1, col2 = st.columns([2,1])
+#     with col1:
+#         stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
+#     with col2:
+#         ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
+
+#     # ✅ [추가] 기본값이 삼성전자일 때 자동으로 필터 적용되도록 보정
+#     # if not stock_q.strip():
+#     #     stock_q = "삼성전자"
+
+#     stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
+#     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
 with tab_stock:
     st.subheader("🔎 종목별 리포트 조회")
     col1, col2 = st.columns([2,1])
@@ -543,13 +557,58 @@ with tab_stock:
         stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
     with col2:
         ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
-    
-    # ✅ [추가] 기본값이 삼성전자일 때 자동으로 필터 적용되도록 보정
-    if not stock_q.strip():
-        stock_q = "삼성전자"
 
-    stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
+    # 1) 입력된 종목명으로 후보(종목명,티커) 목록 만들기
+    #    - docs에서 부분일치로 후보 수집
+    candidates = []
+    if stock_q.strip():
+        seen = set()
+        for d in docs:
+            s = (d.get("stock") or "").strip()
+            t = str(d.get("ticker") or "").strip()
+            if s and stock_q.lower() in s.lower():
+                key = (s, t)
+                if key not in seen:
+                    seen.add(key)
+                    label = f"{s} ({t})" if t else s
+                    candidates.append({"label": label, "stock": s, "ticker": t})
+        # 정렬(가독성)
+        candidates.sort(key=lambda x: (x["stock"], x["ticker"]))
+
+    # 2) 후보가 여러 개면 선택 박스 제공(사용 편의 ↑)
+    selected_stock = None
+    selected_ticker = None
+    if candidates:
+        if len(candidates) == 1:
+            selected_stock = candidates[0]["stock"]
+            selected_ticker = candidates[0]["ticker"]
+        else:
+            opt_labels = [c["label"] for c in candidates]
+            pick = st.selectbox("후보 종목 선택", options=opt_labels, index=0, key="cand_pick")
+            _picked = next((c for c in candidates if c["label"] == pick), None)
+            if _picked:
+                selected_stock = _picked["stock"]
+                selected_ticker = _picked["ticker"]
+
+    # 3) 필터링 로직
+    #    - 후보가 선택되었으면 '정확히 그 종목/티커'로 필터
+    #    - 아니면 기존 부분일치/정확 매칭 로직 사용
+    if selected_stock:
+        stock_docs = [
+            d for d in docs
+            if (d.get("stock") or "").strip() == selected_stock
+            and (selected_ticker is None or str(d.get("ticker") or "").strip() == selected_ticker)
+        ]
+        # 상단에 검색 대상 표시
+        st.markdown(f"**검색 대상:** {selected_stock} ({selected_ticker or '-'})")
+    else:
+        stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
+        # 후보 수 안내(선택 전)
+        if candidates:
+            st.caption(f"후보 종목 {len(candidates)}개 중에서 선택하세요.")
+
     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
+
 
     if not stock_docs:
         st.info("해당 조건의 리포트가 없습니다. 종목명/티커 또는 기간/증권사를 조정해 보세요.")
@@ -615,6 +674,8 @@ with tab_stock:
                 "리포트일": r.get("report_date",""),
                 "증권사": r.get("broker",""),
                 "애널리스트": r.get("analyst_name") or r.get("analyst",""),
+                "종목": r.get("stock",""),          # ✅ 추가
+                "티커": r.get("ticker",""),         # ✅ 추가
                 "레이팅": r.get("rating") or r.get("rating_norm",""),
                 "목표가": r.get("target_price"),
                 "제목": r.get("title",""),
