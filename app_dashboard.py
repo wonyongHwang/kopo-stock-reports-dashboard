@@ -352,6 +352,61 @@ def get_last_updated_from_docs(docs):
 # -----------------------------
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 분석")
+# --- Tabs 시인성 향상 (CSS 스타일 주입: 최소 변경) ---
+st.markdown("""
+<style>
+/* 탭 묶음 하단 경계선 & 간격 */
+div[data-testid="stTabs"] div[role="tablist"] {
+  border-bottom: 2px solid #e9ecef;
+  gap: 8px;
+  padding-bottom: 2px;
+  margin-bottom: 8px;
+}
+
+/* 각 탭 버튼: 기본(비활성) 스타일 */
+div[data-testid="stTabs"] button[role="tab"] {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #495057;
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-bottom: none; /* 아래쪽은 콘텐츠 카드와 연결되므로 없앰 */
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: inset 0 -3px 0 0 rgba(0,0,0,0.03);
+}
+
+/* Hover 시 살짝 강조 */
+div[data-testid="stTabs"] button[role="tab"]:hover {
+  background: #f1f3f5;
+  color: #343a40;
+}
+
+/* 활성 탭 */
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+  background: #ffffff;
+  color: #212529;
+  border-color: #dee2e6;
+  box-shadow: inset 0 -4px 0 0 #0d6efd; /* 상단 파란 강조선(브랜드 컬러 느낌) */
+}
+
+/* 탭 패널(내용) 카드 스타일 */
+div[data-testid="stTabs"] > div[data-baseweb="tab-panel"] {
+  border: 1px solid #dee2e6;
+  border-top: none; /* 활성 탭 버튼과 자연스럽게 이어지도록 */
+  border-radius: 0 10px 10px 10px;
+  padding: 16px 16px 10px 16px;
+  background: #ffffff;
+}
+
+/* 작은 화면에서 탭 라벨이 두 줄이 될 때 줄 간격 */
+div[data-testid="stTabs"] button[role="tab"] p {
+  line-height: 1.1;
+  margin: 0;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---- 사이드바 ----
 with st.sidebar:
@@ -579,16 +634,32 @@ with tab_stock:
     selected_stock = None
     selected_ticker = None
     if candidates:
-        if len(candidates) == 1:
-            selected_stock = candidates[0]["stock"]
-            selected_ticker = candidates[0]["ticker"]
-        else:
-            opt_labels = [c["label"] for c in candidates]
-            pick = st.selectbox("후보 종목 선택", options=opt_labels, index=0, key="cand_pick")
-            _picked = next((c for c in candidates if c["label"] == pick), None)
-            if _picked:
-                selected_stock = _picked["stock"]
-                selected_ticker = _picked["ticker"]
+      if len(candidates) == 1:
+          selected_stock = candidates[0]["stock"]
+          selected_ticker = candidates[0]["ticker"]
+          st.session_state["last_stock_pick"] = candidates[0]["label"]
+      else:
+          opt_labels = [c["label"] for c in candidates]
+
+          # ✅ 기존 선택값이 세션에 있으면 복원
+          default_index = 0
+          if "last_stock_pick" in st.session_state and st.session_state["last_stock_pick"] in opt_labels:
+              default_index = opt_labels.index(st.session_state["last_stock_pick"])
+
+          # ✅ 사용자가 바꾼 선택값을 세션에 저장
+          pick = st.selectbox(
+              "후보 종목 선택",
+              options=opt_labels,
+              index=default_index,
+              key="cand_pick"
+          )
+          st.session_state["last_stock_pick"] = pick  # 최신 선택 유지
+
+          _picked = next((c for c in candidates if c["label"] == pick), None)
+          if _picked:
+              selected_stock = _picked["stock"]
+              selected_ticker = _picked["ticker"]
+
 
     # 3) 필터링 로직
     #    - 후보가 선택되었으면 '정확히 그 종목/티커'로 필터
