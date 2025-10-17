@@ -81,6 +81,29 @@ def _aggrid_pick_first(sel):
         return sel.iloc[0].to_dict() if not sel.empty else None
     return None
 
+# --- [추가] horizons에서 가장 최근(최신 end_date) 구간의 마지막 종가 추출 ---
+def last_close_from_horizons(rec: dict) -> float | None:
+    best_close = None
+    best_key = None
+    for h in (rec.get("horizons") or []):
+        sample = h.get("price_sample") or []
+        if not sample:
+            continue
+        # sample[-1]이 가장 최근 시점
+        last = sample[-1]
+        close = last.get("close")
+        # 비교 기준: end_date(없으면 sample의 마지막 date) 문자열 비교
+        end_key = (h.get("end_date") or last.get("date") or "")
+        if close is None:
+            continue
+        if best_key is None or str(end_key) > str(best_key):
+            best_key = end_key
+            try:
+                best_close = float(close)
+            except Exception:
+                pass
+    return best_close
+
 # -----------------------------
 # Firestore Client
 # -----------------------------
@@ -117,6 +140,9 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
     for d in docs_raw:
         x = d.to_dict() or {}
         broker_norm = normalize_broker_name((x.get("broker") or "").strip())
+        # ✅ '한국IR협의회'는 모든 조회에서 제외
+        if broker_norm == "한국IR협의회" or "평가" in broker_norm :
+            continue
         if broker_set and broker_norm not in broker_set:
             continue
         x["broker"] = broker_norm
@@ -741,19 +767,33 @@ with tab_stock:
         st.markdown("### 3) 상세 내역")
         detail_rows = []
         for r in stock_docs:
+            # ✅ 제목 보강: 비어있으면 다른 키/대체문구로 보완
+            title_safe = (r.get("title")
+                          or r.get("pdf_title")
+                          or r.get("detail_title")
+                          or "").strip()
+            if not title_safe:
+                title_safe = f'{(r.get("stock") or "").strip()} 리포트'
+
+            # ✅ 마지막 종가 추출
+            last_close = last_close_from_horizons(r)
+
             detail_rows.append({
                 "리포트일": r.get("report_date",""),
                 "증권사": r.get("broker",""),
                 "애널리스트": r.get("analyst_name") or r.get("analyst",""),
-                "종목": r.get("stock",""),          # ✅ 추가
-                "티커": r.get("ticker",""),         # ✅ 추가
+                "종목": r.get("stock",""),          # (이전 수정에서 추가되어 있을 수 있음)
+                "티커": r.get("ticker",""),         # (이전 수정에서 추가되어 있을 수 있음)
                 "레이팅": r.get("rating") or r.get("rating_norm",""),
                 "목표가": r.get("target_price"),
-                "제목": r.get("title",""),
+                "마지막종가": last_close,            # ✅ 새 컬럼 추가 (목표가 옆)
+                "제목": title_safe,                  # ✅ 빈 제목 보정
                 "리포트PDF": r.get("pdf_url","") or r.get("report_url",""),
                 "상세페이지": r.get("detail_url",""),
             })
+
         det_df = pd.DataFrame(detail_rows).sort_values("리포트일", ascending=False).reset_index(drop=True)
+
         if "리포트PDF" in det_df.columns:
             det_df["리포트PDF"] = det_df["리포트PDF"].map(_norm_url)
         if "상세페이지" in det_df.columns:
