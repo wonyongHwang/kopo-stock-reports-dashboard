@@ -21,13 +21,42 @@ from google.cloud import firestore
 # ====== Ag-Grid 옵션 ======
 _AGGRID_AVAILABLE = True
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 except Exception:
     _AGGRID_AVAILABLE = False
+
+
+# 표 스크롤 높이(픽셀)
+TABLE_SCROLL_HEIGHT = 520  # 필요하면 420~680 사이로 조절
 
 # -----------------------------
 # 정규화 & 유틸
 # -----------------------------
+def naver_item_url(ticker: str | None) -> str:
+    t = (ticker or "").strip()
+    if not t or len(t) != 6:
+        return "https://finance.naver.com"
+    return f"https://finance.naver.com/item/main.naver?code={t}"
+
+def last_close_from_horizons(rec: dict) -> float | None:
+    """horizons[].price_sample[]에서 가장 최근 close 값을 반환"""
+    horizons = rec.get("horizons") or []
+    if not horizons:
+        return None
+    # end_date 기준으로 정렬 후, 가장 뒤의 price_sample 마지막 close 사용
+    try:
+        horizons = sorted(horizons, key=lambda h: h.get("end_date",""))
+    except Exception:
+        pass
+    last_close = None
+    for h in horizons:
+        ps = h.get("price_sample") or []
+        closes = [p.get("close") for p in ps if p.get("close") is not None]
+        if closes:
+            last_close = float(closes[-1])
+    return last_close
+
+
 def normalize_broker_name(name: str) -> str:
     if not name:
         return ""
@@ -81,35 +110,58 @@ def _aggrid_pick_first(sel):
         return sel.iloc[0].to_dict() if not sel.empty else None
     return None
 
-# --- [추가] horizons에서 가장 최근(최신 end_date) 구간의 마지막 종가 추출 ---
-def last_close_from_horizons(rec: dict) -> float | None:
-    best_close = None
-    best_key = None
-    for h in (rec.get("horizons") or []):
-        sample = h.get("price_sample") or []
-        if not sample:
-            continue
-        # sample[-1]이 가장 최근 시점
-        last = sample[-1]
-        close = last.get("close")
-        # 비교 기준: end_date(없으면 sample의 마지막 date) 문자열 비교
-        end_key = (h.get("end_date") or last.get("date") or "")
-        if close is None:
-            continue
-        if best_key is None or str(end_key) > str(best_key):
-            best_key = end_key
-            try:
-                best_close = float(close)
-            except Exception:
-                pass
-    return best_close
-
 # -----------------------------
 # Firestore Client
 # -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_db():
     return firestore.Client()
+# --- [ADD] analyst_reports에서 title 배치 조회 (report_id -> title 매핑) ---
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
+    db = get_db()
+    ids = []
+    for r in records:
+        rid = str(r.get("report_id") or "").strip()
+        if rid:
+            ids.append(rid)
+    ids = sorted(set(ids))
+    if not ids:
+        return {}
+
+    refs = [db.collection("analyst_reports").document(rid) for rid in ids]
+    try:
+        snaps = db.get_all(refs)
+    except Exception:
+        # 네트워크/권한 오류 시 빈 매핑
+        return {}
+
+    out = {}
+    for s in snaps:
+        if not s.exists:
+            continue
+        d = s.to_dict() or {}
+        t = (d.get("title") or d.get("report_title") or d.get("subject") or "").strip()
+        if t:
+            out[s.id] = t
+    return out
+
+
+def _title_from_map_or_fields(rec: dict, title_map: dict[str, str] | None = None) -> str:
+    """title_map(analyst_reports 기반) 우선 → 현재 레코드의 후보 필드 → 안전한 대체제목"""
+    rid = str(rec.get("report_id") or "").strip()
+    if title_map and rid in title_map:
+        return title_map[rid]
+
+    # 기존 후보 필드 먼저 시도
+    t = _pick_title(rec)
+    if t:
+        return t
+
+    # 완전 실패 시: 안전한 대체 조합
+    stock = (rec.get("stock") or "").strip()
+    rdate = (rec.get("report_date") or "").strip()
+    return f"{stock or '리포트'} ({rdate or '-'})"
 
 # -----------------------------
 # 데이터 로드
@@ -336,7 +388,6 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             "구간마지막종가": last_c,
             "종목": rec.get("stock",""),
             "티커": rec.get("ticker",""),
-            "제목": rec.get("title",""),
             "리포트PDF": rec.get("pdf_url","") or rec.get("report_url",""),
             "상세페이지": rec.get("detail_url",""),
             "리포트총점": rec.get("points_total", 0.0),
@@ -536,6 +587,7 @@ with tab_rank:
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_grid_options(rowHeight=ROW_H, headerHeight=HEAD_H)
             gb.configure_column("_row", header_name="", hide=True)
+
             grid = AgGrid(
                 _show_df,
                 gridOptions=gb.build(),
@@ -579,7 +631,7 @@ with tab_rank:
                             "horizon(일)",
                             "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
                             "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
-                            "리포트총점", "제목", "리포트PDF", "상세페이지"
+                            "리포트총점", "리포트PDF", "상세페이지"
                         ]
                         cols = [c for c in wanted if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted]
                         ev_df = ev_df[cols]
@@ -631,13 +683,24 @@ with tab_rank:
 
 #     stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
 #     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
+# (탭2 진입 시) 사용자 입력이 없으면 최초 기본값을 "삼성전자"로
+# 기본 종목 자동 설정 제거 → 공란이면 전체 검색
+if "stock_q" not in st.session_state:
+    st.session_state["stock_q"] = ""
+
+if "ticker_q" not in st.session_state:
+    st.session_state["ticker_q"] = ""
+
 with tab_stock:
     st.subheader("🔎 종목별 리포트 조회")
     col1, col2 = st.columns([2,1])
-    with col1:
-        stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
-    with col2:
-        ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
+    # 기존
+    # stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
+    # ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
+
+    # 변경 (세션 상태 사용)
+    stock_q = st.text_input("종목명(부분일치 허용)", key="stock_q", placeholder="예: 삼성전자")
+    ticker_q = st.text_input("티커(정확히 6자리)", key="ticker_q", placeholder="예: 005930")
 
     # 1) 입력된 종목명으로 후보(종목명,티커) 목록 만들기
     #    - docs에서 부분일치로 후보 수집
@@ -691,18 +754,23 @@ with tab_stock:
     #    - 후보가 선택되었으면 '정확히 그 종목/티커'로 필터
     #    - 아니면 기존 부분일치/정확 매칭 로직 사용
     if selected_stock:
+        # 특정 종목이 선택된 경우만 그 종목만 필터링
         stock_docs = [
             d for d in docs
             if (d.get("stock") or "").strip() == selected_stock
             and (selected_ticker is None or str(d.get("ticker") or "").strip() == selected_ticker)
         ]
-        # 상단에 검색 대상 표시
         st.markdown(f"**검색 대상:** {selected_stock} ({selected_ticker or '-'})")
     else:
-        stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
-        # 후보 수 안내(선택 전)
-        if candidates:
-            st.caption(f"후보 종목 {len(candidates)}개 중에서 선택하세요.")
+        # 종목명/티커 입력이 없으면 전체 검색
+        if not stock_q.strip() and not ticker_q.strip():
+            stock_docs = docs
+            st.caption("전체 리포트를 검색 중입니다.")
+        else:
+            stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
+            if candidates:
+                st.caption(f"후보 종목 {len(candidates)}개 중에서 선택하세요.")
+
 
     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
 
@@ -763,56 +831,203 @@ with tab_stock:
         anl_df = pd.DataFrame(anl_rows).sort_values(["평균점수","리포트수"], ascending=[False, False]).reset_index(drop=True)
         st.dataframe(anl_df, use_container_width=True)
 
-        # 상세
+        # (데이터 구성부는 기존 그대로 유지)
         st.markdown("### 3) 상세 내역")
         detail_rows = []
+        title_map_stock = fetch_titles_for_records(stock_docs)
+
         for r in stock_docs:
-            # ✅ 제목 보강: 비어있으면 다른 키/대체문구로 보완
-            title_safe = (r.get("title")
-                          or r.get("pdf_title")
-                          or r.get("detail_title")
-                          or "").strip()
+            title_safe = _title_from_map_or_fields(r, title_map_stock)
+          
             if not title_safe:
                 title_safe = f'{(r.get("stock") or "").strip()} 리포트'
-
-            # ✅ 마지막 종가 추출
-            last_close = last_close_from_horizons(r)
+            # 마지막 종가 보조함수 쓰고 계시면 그대로, 없으면 None
+            last_close = None
+            try:
+                # last_close_from_horizons가 이미 있다면 사용
+                last_close = last_close_from_horizons(r)  # ← 여기로 교체
+            except:
+                pass
 
             detail_rows.append({
                 "리포트일": r.get("report_date",""),
                 "증권사": r.get("broker",""),
                 "애널리스트": r.get("analyst_name") or r.get("analyst",""),
-                "종목": r.get("stock",""),          # (이전 수정에서 추가되어 있을 수 있음)
-                "티커": r.get("ticker",""),         # (이전 수정에서 추가되어 있을 수 있음)
+                "종목": r.get("stock",""),
+                # "티커": r.get("ticker",""),
                 "레이팅": r.get("rating") or r.get("rating_norm",""),
                 "목표가": r.get("target_price"),
-                "마지막종가": last_close,            # ✅ 새 컬럼 추가 (목표가 옆)
-                "제목": title_safe,                  # ✅ 빈 제목 보정
-                "리포트PDF": r.get("pdf_url","") or r.get("report_url",""),
-                "상세페이지": r.get("detail_url",""),
+                "마지막종가": last_close,
+                "제목": title_safe,
+                # "리포트PDF": r.get("pdf_url","") or r.get("report_url",""),
+                # "상세페이지": r.get("detail_url",""),
             })
 
         det_df = pd.DataFrame(detail_rows).sort_values("리포트일", ascending=False).reset_index(drop=True)
 
-        if "리포트PDF" in det_df.columns:
-            det_df["리포트PDF"] = det_df["리포트PDF"].map(_norm_url)
-        if "상세페이지" in det_df.columns:
-            det_df["상세페이지"] = det_df["상세페이지"].map(_norm_url)
-        try:
-            st.dataframe(
-                det_df,
-                use_container_width=True,
-                column_config={
-                    "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
-                    "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
-                }
+        # 링크 정리(기존 로직 유지)
+        # if "리포트PDF" in det_df.columns:
+        #     det_df["리포트PDF"] = det_df["리포트PDF"].map(_norm_url)
+        # if "상세페이지" in det_df.columns:
+        #     det_df["상세페이지"] = det_df["상세페이지"].map(_norm_url)
+
+
+        if det_df.empty:
+          st.info("상단 표에서 행을 클릭(선택)하세요.")
+        # ===== 여기부터 '기존 표를 선택 가능'하게 바꾸는 핵심 =====
+        if _AGGRID_AVAILABLE and not det_df.empty:
+            det_df_ag = det_df.reset_index(drop=True).copy()
+            det_df_ag.insert(0, "_row", det_df_ag.index)   # 내부키
+            gb = GridOptionsBuilder.from_dataframe(det_df_ag)
+            # --- [추가] 리포트PDF/상세페이지를 "열기" 하이퍼링크로 표시 ---
+            from st_aggrid import JsCode
+
+            # URL 정규화 (기존 함수 그대로 재사용)
+            # if "리포트PDF" in det_df_ag.columns:
+            #     det_df_ag["리포트PDF"] = det_df_ag["리포트PDF"].map(_norm_url)
+            # if "상세페이지" in det_df_ag.columns:
+            #     det_df_ag["상세페이지"] = det_df_ag["상세페이지"].map(_norm_url)
+
+            # 숫자 컬럼 폭 줄이기(대략)
+            gb.configure_column("목표가", width=110, type=["numericColumn"])
+            gb.configure_column("마지막종가", width=110, type=["numericColumn"])
+            gb.configure_column("레이팅", width=110)
+
+            # gb.configure_column("리포트PDF", header_name="리포트PDF", cellRenderer=_link_renderer, width=100)
+            # gb.configure_column("상세페이지", header_name="상세페이지", cellRenderer=_link_renderer, width=100)
+
+            gb.configure_selection(selection_mode="single", use_checkbox=False)   # ✅ 단일 선택
+            # gb.configure_grid_options(domLayout="autoHeight")
+            gb.configure_column("_row", header_name="", hide=True)
+
+            # [선택] 페이지네이션 켜기 (행이 매우 많을 때 유용)
+            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=50)
+
+            grid = AgGrid(
+                det_df_ag,
+                gridOptions=gb.build(),
+                update_mode=GridUpdateMode.SELECTION_CHANGED,
+                data_return_mode=DataReturnMode.AS_INPUT,
+                theme="streamlit",
+                allow_unsafe_jscode=True,
+                fit_columns_on_grid_load=True,
+                # height=min(700, 40*len(det_df_ag)+160),
+                height=TABLE_SCROLL_HEIGHT,             # ← 고정 높이(스크롤 생김)
+                key="stock_detail_main_table",  # 상태 충돌 방지용 키
             )
-        except Exception:
-            def _a(href):
-                return f'<a href="{href}" target="_blank" rel="noopener noreferrer">열기</a>' if href else ""
-            html_df = det_df.copy()
-            if "리포트PDF" in html_df.columns:
-                html_df["리포트PDF"] = html_df["리포트PDF"].map(_a)
-            if "상세페이지" in html_df.columns:
-                html_df["상세페이지"] = html_df["상세페이지"].map(_a)
-            st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            sel = grid.get("selected_rows", [])
+
+            # 선택된 행이 있으면 바로 아래에 "근거 + 재무스냅샷 + 링크" 표시
+            def _pick_first(sel):
+                if isinstance(sel, list):
+                    return sel[0] if sel else None
+                if isinstance(sel, pd.DataFrame):
+                    return sel.iloc[0].to_dict() if not sel.empty else None
+                return None
+
+            picked = _pick_first(sel)
+            if picked:
+                st.markdown("---")
+                st.markdown("#### 📌 선택 리포트 상세")
+
+                p_stock  = picked.get("종목","")
+                p_ticker = picked.get("티커","")
+                # --- 추가: 티커 비어 있으면 같은 종목의 다른 문서에서 보완 ---
+                if not p_ticker:
+                    for _r in stock_docs:  # 같은 '종목별 검색' 결과 안에서
+                        t = str(_r.get("ticker") or "").strip()
+                        s = (_r.get("stock") or "").strip()
+                        if s == p_stock and t:
+                            p_ticker = t
+                            break
+                p_broker = picked.get("증권사","")
+                p_anl    = picked.get("애널리스트","")
+                p_date   = picked.get("리포트일","")
+                p_pdf    = picked.get("리포트PDF","")
+                p_det    = picked.get("상세페이지","")
+
+                c1, c2, c3, c4 = st.columns([2,2,2,2])
+                c1.markdown(f"**종목/티커**: {p_stock} ({p_ticker or '-'})")
+                c2.markdown(f"**증권사**: {p_broker}")
+                c3.markdown(f"**애널리스트**: {p_anl}")
+                c4.markdown(f"**리포트일**: {p_date}")
+                # st.markdown(f"[PDF 열기]({_norm_url(p_pdf)})  |  [상세페이지 열기]({_norm_url(p_det)})")
+
+                # (A) 동일 애널리스트 근거 — 랭킹 탭과 같은 형식으로
+                st.markdown("#### 📄 해당 애널리스트의 근거 내역")
+                with st.spinner("애널리스트 상세 로딩..."):
+                    items = load_detail_for_analyst(p_anl, p_broker, date_from, date_to)
+                    # === 추가: 근거 상단 요약 (Reports / RankScore / Coverage) ===
+                    reports_n = len(items)
+                    total_pts = 0.0
+                    dates = []
+                    for it in items:
+                        try:
+                            total_pts += float(it.get("points_total") or 0.0)
+                        except Exception:
+                            pass
+                        rd = (it.get("report_date") or "").strip()
+                        if rd: dates.append(rd)
+
+                    rank_score = 0.0
+                    if reports_n:
+                        rank_score = total_pts / reports_n if metric == "avg" else total_pts
+
+                    cov_first = min(dates) if dates else "-"
+                    cov_last  = max(dates) if dates else "-"
+
+                    st.write(f"**Reports:** {reports_n}  |  **RankScore:** {round(rank_score, 4)}  |  **Coverage:** {cov_first} → {cov_last}")
+
+                if items:
+                    rows_ev = []
+                    for it in items:
+                        rows_ev.extend(horizon_to_rows(it))
+                    ev_df = pd.DataFrame(rows_ev)
+
+                    wanted_cols = [
+                        "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
+                        "horizon(일)",
+                        "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
+                        "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
+                        "리포트총점", "리포트PDF", "상세페이지"
+                    ]
+                    cols = [c for c in wanted_cols if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted_cols]
+                    ev_df = ev_df[cols]
+
+                    if "리포트PDF" in ev_df.columns:
+                        ev_df["리포트PDF"] = ev_df["리포트PDF"].map(_norm_url)
+                    if "상세페이지" in ev_df.columns:
+                        ev_df["상세페이지"] = ev_df["상세페이지"].map(_norm_url)
+
+                    try:
+                        st.dataframe(
+                            ev_df,
+                            use_container_width=True,
+                            column_config={
+                                "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
+                                "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
+                            },
+                        )
+                    except Exception:
+                        def _a(href):
+                            return f'<a href="{href}" target="_blank" rel="noopener noreferrer">열기</a>' if href else ""
+                        html_df = ev_df.copy()
+                        if "리포트PDF" in html_df.columns:
+                            html_df["리포트PDF"] = html_df["리포트PDF"].map(_a)
+                        if "상세페이지" in html_df.columns:
+                            html_df["상세페이지"] = html_df["상세페이지"].map(_a)
+                        st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                else:
+                    st.info("선택한 애널리스트의 상세 근거가 없습니다.")
+
+                # (B) 종목 재무 스냅샷 + 네이버 링크
+                # (교체) 종목 재무 스냅샷 → 링크만
+                st.markdown("#### 📈 종목 정보")
+                st.markdown(f"[네이버 금융 상세 보기]({naver_item_url(p_ticker)})")
+
+        else:
+            # Ag-Grid가 없으면 기존 st.dataframe만 표시 (클릭 기능 없음)
+            # st.dataframe(det_df, use_container_width=True)
+            st.dataframe(det_df, use_container_width=True, height=TABLE_SCROLL_HEIGHT)
+            st.info("행 클릭(선택)을 사용하려면 `streamlit-aggrid` 설치가 필요합니다.")
