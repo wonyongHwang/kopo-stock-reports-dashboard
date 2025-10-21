@@ -146,6 +146,13 @@ def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
             out[s.id] = t
     return out
 
+def _pick_title(rec: dict) -> str:
+    """레코드 안에서 제목 후보 필드들을 우선순위로 선택"""
+    for k in ["title", "report_title", "subject", "report_subject", "headline", "name"]:
+        t = (rec.get(k) or "").strip()
+        if t:
+            return t
+    return ""
 
 def _title_from_map_or_fields(rec: dict, title_map: dict[str, str] | None = None) -> str:
     """title_map(analyst_reports 기반) 우선 → 현재 레코드의 후보 필드 → 안전한 대체제목"""
@@ -171,15 +178,20 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
                       brokers: List[str] | None, limit: int = 3000) -> List[Dict[str, Any]]:
     """evaluations/by_analyst 그룹에서 기간/브로커 필터로 문서 로드"""
     db = get_db()
-    want_min = date_from.isoformat() if date_from else None
-    want_max = date_to.isoformat() if date_to else None
+    # want_min = date_from.isoformat() if date_from else None
+    # want_max = date_to.isoformat() if date_to else None
 
     docs_raw = []
     server_filtered = False
     try:
         q = db.collection_group("by_analyst")
-        if want_min: q = q.where("report_date", ">=", want_min)
-        if want_max: q = q.where("report_date", "<=", want_max)
+        want_min = date_from.isoformat() if date_from else None
+        # next day for exclusive upper bound
+        want_max_excl = (date_to + dt.timedelta(days=1)).isoformat() if date_to else None
+
+        q = db.collection_group("by_analyst")
+        if want_min:     q = q.where("report_date", ">=", want_min)
+        if want_max_excl:q = q.where("report_date", "<",  want_max_excl)
         q = q.limit(limit)
         docs_raw = list(q.stream())
         server_filtered = True
@@ -685,6 +697,25 @@ with tab_rank:
 #     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
 # (탭2 진입 시) 사용자 입력이 없으면 최초 기본값을 "삼성전자"로
 # 기본 종목 자동 설정 제거 → 공란이면 전체 검색
+# ! 파이프라인 지연 : 근본 원인은 대개 집계 단계의 스케줄/동시성/재시도 + 리전 불일치가 결합된 것.
+#                 집계를 서울 리전으로 옮기고, UI는 오늘만 원본 병합으로 즉시 보완하면 사용자 체감 문제는 사라집니다.
+
+import datetime as dt, time
+today = dt.date.today()
+is_today_range = (date_from and date_to and date_from <= today <= date_to)
+
+# 신선도 배너
+if is_today_range:
+    by_cnt = sum(1 for d in docs if str(d.get("report_date","")).startswith(today.isoformat()))
+    db = get_db()
+    ar_cnt = len(list(db.collection("analyst_reports")
+                      .where("pred_time", ">=", today.isoformat())
+                      .where("pred_time", "<",  (today + dt.timedelta(days=1)).isoformat())
+                      .stream()))
+    if ar_cnt > by_cnt:
+        st.warning(f"오늘 데이터 동기화 진행 중: by_analyst {by_cnt}건 / analyst_reports {ar_cnt}건")
+
+
 if "stock_q" not in st.session_state:
     st.session_state["stock_q"] = ""
 
@@ -838,7 +869,7 @@ with tab_stock:
 
         for r in stock_docs:
             title_safe = _title_from_map_or_fields(r, title_map_stock)
-          
+
             if not title_safe:
                 title_safe = f'{(r.get("stock") or "").strip()} 리포트'
             # 마지막 종가 보조함수 쓰고 계시면 그대로, 없으면 None
@@ -927,6 +958,8 @@ with tab_stock:
                 return None
 
             picked = _pick_first(sel)
+            if not picked and not det_df_ag.empty:
+                picked = det_df_ag.iloc[0].to_dict()  # ← 첫 행 자동 픽
             if picked:
                 st.markdown("---")
                 st.markdown("#### 📌 선택 리포트 상세")
