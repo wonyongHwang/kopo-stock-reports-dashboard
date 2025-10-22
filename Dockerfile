@@ -15,6 +15,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 앱 소스 복사 직전/직후에 .streamlit도 함께 복사
+COPY .streamlit/ ./.streamlit/
+
 # 앱 소스 복사
 COPY app_dashboard.py ./
 # 필요 시 다른 모듈도 같이 복사

@@ -1,0 +1,15 @@
+# .streamlit/config.toml
+[server]
+address = "0.0.0.0"
+port = 8080
+enableCORS = false
+enableXsrfProtection = false
+
+# 🔴 리로드 트리거를 아예 끔 (운영 환경 권장)
+fileWatcherType = "none"
+
+# 또는 'none'이 부담되면 'poll'로 완화:
+# fileWatcherType = "poll"
+
+[runner]
+fastReruns = false

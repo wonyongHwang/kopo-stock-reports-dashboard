@@ -18,7 +18,11 @@ import streamlit as st
 import pandas as pd
 import pytz
 from google.cloud import firestore
-
+import os
+os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
+os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+# Streamlit 1.29+는 아래도 지원
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 # ====== Ag-Grid 옵션 ======
 _AGGRID_AVAILABLE = True
 try:
