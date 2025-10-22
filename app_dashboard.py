@@ -205,7 +205,7 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
         x = d.to_dict() or {}
         broker_norm = normalize_broker_name((x.get("broker") or "").strip())
         # ✅ '한국IR협의회' 제외
-        if broker_norm == "한국IR협의회": or "평가" in broker_norm :
+        if broker_norm == "한국IR협의회" or "평가" in broker_norm :
             continue
         if broker_set and broker_norm not in broker_set:
             continue
