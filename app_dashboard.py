@@ -791,7 +791,7 @@ with tab_stock:
     if candidates:
         if len(candidates) == 1:
             selected_stock = candidates[0]["stock"]
-            selected_ticker = candidates[0]["ticker"]
+            selected_ticker = (candidates[0]["ticker"] or "").strip() or None  # ← 빈 값은 None 처리
             st.session_state["last_stock_pick"] = candidates[0]["label"]
         else:
             opt_labels = [c["label"] for c in candidates]
@@ -808,14 +808,15 @@ with tab_stock:
             _picked = next((c for c in candidates if c["label"] == pick), None)
             if _picked:
                 selected_stock = _picked["stock"]
-                selected_ticker = _picked["ticker"]
+                selected_ticker = (_picked["ticker"] or "").strip() or None  # ← 빈 값은 None 처리
 
     # 3) 필터링 로직 (docs_for_stock 사용)
     if selected_stock:
+        _sel_tk = (selected_ticker or "").strip()  # ← 빈 값이면 ""
         stock_docs = [
             d for d in docs_for_stock
             if (d.get("stock") or "").strip() == selected_stock
-            and (selected_ticker is None or str(d.get("ticker") or "").strip() == selected_ticker)
+            and (not _sel_tk or str(d.get("ticker") or "").strip() == _sel_tk)
         ]
         st.markdown(f"**검색 대상:** {selected_stock} ({selected_ticker or '-'})")
     else:
