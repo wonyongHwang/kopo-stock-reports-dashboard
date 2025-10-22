@@ -4,6 +4,6 @@ beautifulsoup4
 pandas
 google-cloud-firestore
 google-auth
-streamlit==1.50.0
-streamlit-aggrid==1.1.9
+streamlit==1.37.1
+streamlit-aggrid==0.3.4.post3
 pyngrok==4.1.1
