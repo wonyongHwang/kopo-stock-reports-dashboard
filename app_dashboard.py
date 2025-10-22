@@ -28,6 +28,13 @@ os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 # 운영환경 권장: 파일 변경 감시를 'poll'로 (none은 일부 환경에서 세션/컴포넌트 초기화 타이밍 이슈)
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "poll")
 
+# 맨 위 import 아래 아무 데나
+try:
+    from streamlit.components.v1.components import _component_registry
+    st.sidebar.code("registered components:\n" + "\n".join(sorted(_component_registry.keys())))
+except Exception as e:
+    st.sidebar.write("component-registry check failed:", e)
+    
 # ====== Ag-Grid 옵션 / 임포트 가시화 ======
 _AGGRID_AVAILABLE = True
 _AGGRID_ERROR = None
