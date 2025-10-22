@@ -12,24 +12,31 @@ import math
 import datetime as dt
 from typing import List, Dict, Any
 import re
-import time  # ← 중복 import 정리 (dt는 위에서)
+import time
 
 import streamlit as st
 import pandas as pd
 import pytz
 from google.cloud import firestore
 import os
+
+# -----------------------------
+# 운영 안정화: 캐시/통계/파일워처
+# -----------------------------
 os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
-# Streamlit 1.29+는 아래도 지원
-os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
-# ====== Ag-Grid 옵션 ======
-_AGGRID_AVAILABLE = True
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-except Exception:
-    _AGGRID_AVAILABLE = False
+# 운영환경 권장: 파일 변경 감시를 'poll'로 (none은 일부 환경에서 세션/컴포넌트 초기화 타이밍 이슈)
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "poll")
 
+# ====== Ag-Grid 옵션 / 임포트 가시화 ======
+_AGGRID_AVAILABLE = True
+_AGGRID_ERROR = None
+try:
+    import st_aggrid as _st_aggrid_pkg  # 패키지 경로/자산 헬스체크용
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
+except Exception as e:
+    _AGGRID_AVAILABLE = False
+    _AGGRID_ERROR = e
 
 # 표 스크롤 높이(픽셀)
 TABLE_SCROLL_HEIGHT = 520  # 필요하면 420~680 사이로 조절
@@ -445,6 +452,19 @@ def get_last_updated_from_docs(docs):
 # -----------------------------
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 분석")
+
+# --- st_aggrid 헬스체크(사이드바에서만 노출; 운영 중 이슈 파악용) ---
+with st.sidebar.expander("디버그 · st_aggrid 상태", expanded=False):
+    if not _AGGRID_AVAILABLE:
+        st.error(f"st_aggrid import 실패: {type(_AGGRID_ERROR).__name__}: {_AGGRID_ERROR}")
+    else:
+        try:
+            from pathlib import Path
+            comp_index = Path(_st_aggrid_pkg.__file__).parent / "frontend" / "build" / "index.html"
+            st.caption(f"AgGrid frontend exists: {comp_index.exists()} · {comp_index}")
+        except Exception as e:
+            st.warning(f"AgGrid 자산 경로 확인 실패: {e}")
+
 # --- Tabs 시인성 향상 (CSS 스타일 주입: 최소 변경) ---
 st.markdown("""
 <style>
@@ -463,7 +483,7 @@ div[data-testid="stTabs"] button[role="tab"] {
   color: #495057;
   background: #f8f9fa;
   border: 1px solid #e9ecef;
-  border-bottom: none; /* 아래쪽은 콘텐츠 카드와 연결되므로 없앰 */
+  border-bottom: none;
   border-top-left-radius: 8px;
   border-top-right-radius: 8px;
   padding: 10px 14px;
@@ -481,13 +501,13 @@ div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
   background: #ffffff;
   color: #212529;
   border-color: #dee2e6;
-  box-shadow: inset 0 -4px 0 0 #0d6efd; /* 상단 파란 강조선(브랜드 컬러 느낌) */
+  box-shadow: inset 0 -4px 0 0 #0d6efd;
 }
 
 /* 탭 패널(내용) 카드 스타일 */
 div[data-testid="stTabs"] > div[data-baseweb="tab-panel"] {
   border: 1px solid #dee2e6;
-  border-top: none; /* 활성 탭 버튼과 자연스럽게 이어지도록 */
+  border-top: none;
   border-radius: 0 10px 10px 10px;
   padding: 16px 16px 10px 16px;
   background: #ffffff;
@@ -655,7 +675,6 @@ with tab_rank:
         st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
         # Ag-Grid 렌더링 (선택 안정화)
-        selected_idx = None
         _show_df = show_df.reset_index(drop=True).copy()
         ROW_H, HEAD_H, PADDING = 34, 40, 32
         GRID_H = min(HEAD_H + ROW_H * len(_show_df) + PADDING, HEAD_H + ROW_H * 25 + 400)
@@ -689,7 +708,7 @@ with tab_rank:
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
                 height=GRID_H,
-                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
+                enable_enterprise_modules=False,  # ← Enterprise 경고/자산 로드 방지
             )
             sel = grid.get("selected_rows", [])
             if _aggrid_selected_empty(sel):
@@ -962,7 +981,7 @@ with tab_stock:
                 fit_columns_on_grid_load=True,
                 height=TABLE_SCROLL_HEIGHT,
                 key="stock_detail_main_table",
-                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
+                enable_enterprise_modules=False,  # ← Enterprise 경고/자산 로드 방지
             )
 
             sel = grid.get("selected_rows", [])
