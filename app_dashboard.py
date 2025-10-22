@@ -12,6 +12,7 @@ import math
 import datetime as dt
 from typing import List, Dict, Any
 import re
+import time  # ← 중복 import 정리 (dt는 위에서)
 
 import streamlit as st
 import pandas as pd
@@ -116,6 +117,7 @@ def _aggrid_pick_first(sel):
 @st.cache_resource(show_spinner=False)
 def get_db():
     return firestore.Client()
+
 # --- [ADD] analyst_reports에서 title 배치 조회 (report_id -> title 매핑) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
@@ -178,8 +180,6 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
                       brokers: List[str] | None, limit: int = 3000) -> List[Dict[str, Any]]:
     """evaluations/by_analyst 그룹에서 기간/브로커 필터로 문서 로드"""
     db = get_db()
-    # want_min = date_from.isoformat() if date_from else None
-    # want_max = date_to.isoformat() if date_to else None
 
     docs_raw = []
     server_filtered = False
@@ -204,8 +204,8 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
     for d in docs_raw:
         x = d.to_dict() or {}
         broker_norm = normalize_broker_name((x.get("broker") or "").strip())
-        # ✅ '한국IR협의회'는 모든 조회에서 제외
-        if broker_norm == "한국IR협의회" or "평가" in broker_norm :
+        # ✅ '한국IR협의회' 제외
+        if broker_norm == "한국IR협의회": or "평가" in broker_norm :
             continue
         if broker_set and broker_norm not in broker_set:
             continue
@@ -564,6 +564,69 @@ else:
 st.caption(f"최근 평가 반영 시각(문서 기준): {format_ts(get_last_updated_from_docs(docs))}")
 
 # -----------------------------
+# 오늘 범위 신선도 배너 + 탭2 병합 데이터 준비
+# -----------------------------
+today = dt.date.today()
+is_today_range = (date_from and date_to and date_from <= today <= date_to)
+
+# 신선도 배너
+if is_today_range:
+    by_cnt = sum(1 for d in docs if str(d.get("report_date","")).startswith(today.isoformat()))
+    db = get_db()
+    ar_cnt = len(list(db.collection("analyst_reports")
+                      .where("pred_time", ">=", today.isoformat())
+                      .where("pred_time", "<",  (today + dt.timedelta(days=1)).isoformat())
+                      .stream()))
+    if ar_cnt > by_cnt:
+        st.warning(f"오늘 데이터 동기화 진행 중: by_analyst {by_cnt}건 / analyst_reports {ar_cnt}건")
+
+# === 탭2(종목별 검색) 전용: 오늘 범위면 analyst_reports 병합 ===
+docs_for_stock = docs[:]  # 기본은 by_analyst 결과
+if is_today_range:
+    db = get_db()
+    iso_min = date_from.isoformat()
+    iso_max_excl = (date_to + dt.timedelta(days=1)).isoformat()
+
+    try:
+        q_ar = (db.collection("analyst_reports")
+                  .where("pred_time", ">=", iso_min)
+                  .where("pred_time", "<",  iso_max_excl)
+                  .limit(max_docs))
+        rows = [s.to_dict() or {} for s in q_ar.stream()]
+    except Exception:
+        rows = []
+
+    # 중복 제거용 키(기존 docs 먼저 반영)
+    seen = set((
+        str(x.get("report_id") or ""),
+        normalize_broker_name(x.get("broker") or ""),
+        (x.get("analyst_name") or x.get("analyst") or "").strip(),
+        str(x.get("report_date") or "")
+    ) for x in docs_for_stock)
+
+    for x in rows:
+        # 날짜 정규화: 문자열 YYYY-MM-DD로 통일
+        rd = (x.get("report_date") or x.get("pred_time") or "")
+        x["report_date"] = str(rd)[:10] if rd else ""
+
+        # 브로커 정규화 (+ 과도 배제 제거)
+        b = normalize_broker_name(x.get("broker") or "")
+        if b == "한국IR협의회":
+            continue
+        x["broker"] = b
+
+        # 애널리스트 표준화
+        a_raw = (x.get("analyst_name") or x.get("analyst") or "").strip()
+        x["analyst_name"] = a_raw
+        x["analyst_name_norm"] = x.get("analyst_name_norm") or normalize_analyst_name(a_raw)
+
+        k = (str(x.get("report_id") or ""), b, a_raw, x["report_date"])
+        if k in seen:
+            continue
+        seen.add(k)
+        docs_for_stock.append(x)
+
+# -----------------------------
 # Tabs
 # -----------------------------
 tab_rank, tab_stock = st.tabs(["🏆 종목리포트 평가 랭킹보드", "🔎 종목별 검색"])
@@ -600,6 +663,19 @@ with tab_rank:
             gb.configure_grid_options(rowHeight=ROW_H, headerHeight=HEAD_H)
             gb.configure_column("_row", header_name="", hide=True)
 
+            # ⬇️ Community 고정: 엔터프라이즈 기능 OFF
+            gb.configure_default_column(
+                editable=False,
+                groupable=False,
+                enableValue=False,
+                enableRowGroup=False,
+                enablePivot=False,
+            )
+            try:
+                gb.configure_side_bar(False)
+            except Exception:
+                pass
+
             grid = AgGrid(
                 _show_df,
                 gridOptions=gb.build(),
@@ -609,6 +685,7 @@ with tab_rank:
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
                 height=GRID_H,
+                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
             )
             sel = grid.get("selected_rows", [])
             if _aggrid_selected_empty(sel):
@@ -622,8 +699,6 @@ with tab_rank:
                     picked_broker = picked.get("Broker", "Unknown Broker")
                     st.markdown(f"### {picked_name} — {picked_broker}")
                     st.write(f"**Reports:** {picked.get('Reports', '-') } | **RankScore:** {picked.get('RankScore', '-') }")
-                    # 커버리지(선택된 페이징 내 first/last 대신 전체 테이블 기준 표기 필요 시 rank_df에서 찾을 수도 있음)
-                    # 간단히 현재 슬라이스 값으로 표기
                     st.write(f"**Coverage:** {picked.get('FirstReport', '-') } → {picked.get('LastReport', '-') }")
 
                     with st.spinner("Loading evidence..."):
@@ -681,41 +756,6 @@ with tab_rank:
 # ===============================
 # 탭2: 종목별 검색
 # ===============================
-# with tab_stock:
-#     st.subheader("🔎 종목별 리포트 조회")
-#     col1, col2 = st.columns([2,1])
-#     with col1:
-#         stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
-#     with col2:
-#         ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
-
-#     # ✅ [추가] 기본값이 삼성전자일 때 자동으로 필터 적용되도록 보정
-#     # if not stock_q.strip():
-#     #     stock_q = "삼성전자"
-
-#     stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
-#     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
-# (탭2 진입 시) 사용자 입력이 없으면 최초 기본값을 "삼성전자"로
-# 기본 종목 자동 설정 제거 → 공란이면 전체 검색
-# ! 파이프라인 지연 : 근본 원인은 대개 집계 단계의 스케줄/동시성/재시도 + 리전 불일치가 결합된 것.
-#                 집계를 서울 리전으로 옮기고, UI는 오늘만 원본 병합으로 즉시 보완하면 사용자 체감 문제는 사라집니다.
-
-import datetime as dt, time
-today = dt.date.today()
-is_today_range = (date_from and date_to and date_from <= today <= date_to)
-
-# 신선도 배너
-if is_today_range:
-    by_cnt = sum(1 for d in docs if str(d.get("report_date","")).startswith(today.isoformat()))
-    db = get_db()
-    ar_cnt = len(list(db.collection("analyst_reports")
-                      .where("pred_time", ">=", today.isoformat())
-                      .where("pred_time", "<",  (today + dt.timedelta(days=1)).isoformat())
-                      .stream()))
-    if ar_cnt > by_cnt:
-        st.warning(f"오늘 데이터 동기화 진행 중: by_analyst {by_cnt}건 / analyst_reports {ar_cnt}건")
-
-
 if "stock_q" not in st.session_state:
     st.session_state["stock_q"] = ""
 
@@ -725,20 +765,16 @@ if "ticker_q" not in st.session_state:
 with tab_stock:
     st.subheader("🔎 종목별 리포트 조회")
     col1, col2 = st.columns([2,1])
-    # 기존
-    # stock_q = st.text_input("종목명(부분일치 허용)", value="", placeholder="예: 삼성전자")
-    # ticker_q = st.text_input("티커(정확히 6자리)", value="", placeholder="예: 005930")
 
-    # 변경 (세션 상태 사용)
+    # 세션 상태 사용
     stock_q = st.text_input("종목명(부분일치 허용)", key="stock_q", placeholder="예: 삼성전자")
     ticker_q = st.text_input("티커(정확히 6자리)", key="ticker_q", placeholder="예: 005930")
 
-    # 1) 입력된 종목명으로 후보(종목명,티커) 목록 만들기
-    #    - docs에서 부분일치로 후보 수집
+    # 1) 입력된 종목명으로 후보(종목명,티커) 목록 만들기 (docs_for_stock 사용)
     candidates = []
     if stock_q.strip():
         seen = set()
-        for d in docs:
+        for d in docs_for_stock:
             s = (d.get("stock") or "").strip()
             t = str(d.get("ticker") or "").strip()
             if s and stock_q.lower() in s.lower():
@@ -747,64 +783,51 @@ with tab_stock:
                     seen.add(key)
                     label = f"{s} ({t})" if t else s
                     candidates.append({"label": label, "stock": s, "ticker": t})
-        # 정렬(가독성)
         candidates.sort(key=lambda x: (x["stock"], x["ticker"]))
 
-    # 2) 후보가 여러 개면 선택 박스 제공(사용 편의 ↑)
+    # 2) 후보 선택
     selected_stock = None
     selected_ticker = None
     if candidates:
-      if len(candidates) == 1:
-          selected_stock = candidates[0]["stock"]
-          selected_ticker = candidates[0]["ticker"]
-          st.session_state["last_stock_pick"] = candidates[0]["label"]
-      else:
-          opt_labels = [c["label"] for c in candidates]
+        if len(candidates) == 1:
+            selected_stock = candidates[0]["stock"]
+            selected_ticker = candidates[0]["ticker"]
+            st.session_state["last_stock_pick"] = candidates[0]["label"]
+        else:
+            opt_labels = [c["label"] for c in candidates]
+            default_index = 0
+            if "last_stock_pick" in st.session_state and st.session_state["last_stock_pick"] in opt_labels:
+                default_index = opt_labels.index(st.session_state["last_stock_pick"])
+            pick = st.selectbox(
+                "후보 종목 선택",
+                options=opt_labels,
+                index=default_index,
+                key="cand_pick"
+            )
+            st.session_state["last_stock_pick"] = pick
+            _picked = next((c for c in candidates if c["label"] == pick), None)
+            if _picked:
+                selected_stock = _picked["stock"]
+                selected_ticker = _picked["ticker"]
 
-          # ✅ 기존 선택값이 세션에 있으면 복원
-          default_index = 0
-          if "last_stock_pick" in st.session_state and st.session_state["last_stock_pick"] in opt_labels:
-              default_index = opt_labels.index(st.session_state["last_stock_pick"])
-
-          # ✅ 사용자가 바꾼 선택값을 세션에 저장
-          pick = st.selectbox(
-              "후보 종목 선택",
-              options=opt_labels,
-              index=default_index,
-              key="cand_pick"
-          )
-          st.session_state["last_stock_pick"] = pick  # 최신 선택 유지
-
-          _picked = next((c for c in candidates if c["label"] == pick), None)
-          if _picked:
-              selected_stock = _picked["stock"]
-              selected_ticker = _picked["ticker"]
-
-
-    # 3) 필터링 로직
-    #    - 후보가 선택되었으면 '정확히 그 종목/티커'로 필터
-    #    - 아니면 기존 부분일치/정확 매칭 로직 사용
+    # 3) 필터링 로직 (docs_for_stock 사용)
     if selected_stock:
-        # 특정 종목이 선택된 경우만 그 종목만 필터링
         stock_docs = [
-            d for d in docs
+            d for d in docs_for_stock
             if (d.get("stock") or "").strip() == selected_stock
             and (selected_ticker is None or str(d.get("ticker") or "").strip() == selected_ticker)
         ]
         st.markdown(f"**검색 대상:** {selected_stock} ({selected_ticker or '-'})")
     else:
-        # 종목명/티커 입력이 없으면 전체 검색
         if not stock_q.strip() and not ticker_q.strip():
-            stock_docs = docs
+            stock_docs = docs_for_stock
             st.caption("전체 리포트를 검색 중입니다.")
         else:
-            stock_docs = [d for d in docs if match_stock(d, stock_q or None, ticker_q or None)]
+            stock_docs = [d for d in docs_for_stock if match_stock(d, stock_q or None, ticker_q or None)]
             if candidates:
                 st.caption(f"후보 종목 {len(candidates)}개 중에서 선택하세요.")
 
-
     st.caption(f"검색결과: {len(stock_docs)}건 (기간·증권사 필터 적용 후 종목 필터)")
-
 
     if not stock_docs:
         st.info("해당 조건의 리포트가 없습니다. 종목명/티커 또는 기간/증권사를 조정해 보세요.")
@@ -869,14 +892,12 @@ with tab_stock:
 
         for r in stock_docs:
             title_safe = _title_from_map_or_fields(r, title_map_stock)
-
             if not title_safe:
                 title_safe = f'{(r.get("stock") or "").strip()} 리포트'
-            # 마지막 종가 보조함수 쓰고 계시면 그대로, 없으면 None
+
             last_close = None
             try:
-                # last_close_from_horizons가 이미 있다면 사용
-                last_close = last_close_from_horizons(r)  # ← 여기로 교체
+                last_close = last_close_from_horizons(r)
             except:
                 pass
 
@@ -896,43 +917,35 @@ with tab_stock:
 
         det_df = pd.DataFrame(detail_rows).sort_values("리포트일", ascending=False).reset_index(drop=True)
 
-        # 링크 정리(기존 로직 유지)
-        # if "리포트PDF" in det_df.columns:
-        #     det_df["리포트PDF"] = det_df["리포트PDF"].map(_norm_url)
-        # if "상세페이지" in det_df.columns:
-        #     det_df["상세페이지"] = det_df["상세페이지"].map(_norm_url)
-
-
         if det_df.empty:
-          st.info("상단 표에서 행을 클릭(선택)하세요.")
-        # ===== 여기부터 '기존 표를 선택 가능'하게 바꾸는 핵심 =====
+            st.info("상단 표에서 행을 클릭(선택)하세요.")
+
         if _AGGRID_AVAILABLE and not det_df.empty:
             det_df_ag = det_df.reset_index(drop=True).copy()
             det_df_ag.insert(0, "_row", det_df_ag.index)   # 내부키
             gb = GridOptionsBuilder.from_dataframe(det_df_ag)
-            # --- [추가] 리포트PDF/상세페이지를 "열기" 하이퍼링크로 표시 ---
-            from st_aggrid import JsCode
-
-            # URL 정규화 (기존 함수 그대로 재사용)
-            # if "리포트PDF" in det_df_ag.columns:
-            #     det_df_ag["리포트PDF"] = det_df_ag["리포트PDF"].map(_norm_url)
-            # if "상세페이지" in det_df_ag.columns:
-            #     det_df_ag["상세페이지"] = det_df_ag["상세페이지"].map(_norm_url)
 
             # 숫자 컬럼 폭 줄이기(대략)
             gb.configure_column("목표가", width=110, type=["numericColumn"])
             gb.configure_column("마지막종가", width=110, type=["numericColumn"])
             gb.configure_column("레이팅", width=110)
 
-            # gb.configure_column("리포트PDF", header_name="리포트PDF", cellRenderer=_link_renderer, width=100)
-            # gb.configure_column("상세페이지", header_name="상세페이지", cellRenderer=_link_renderer, width=100)
-
-            gb.configure_selection(selection_mode="single", use_checkbox=False)   # ✅ 단일 선택
-            # gb.configure_grid_options(domLayout="autoHeight")
+            gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_column("_row", header_name="", hide=True)
-
-            # [선택] 페이지네이션 켜기 (행이 매우 많을 때 유용)
             gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=50)
+
+            # ⬇️ Community 고정: 엔터프라이즈 기능 OFF
+            gb.configure_default_column(
+                editable=False,
+                groupable=False,
+                enableValue=False,
+                enableRowGroup=False,
+                enablePivot=False,
+            )
+            try:
+                gb.configure_side_bar(False)
+            except Exception:
+                pass
 
             grid = AgGrid(
                 det_df_ag,
@@ -942,14 +955,13 @@ with tab_stock:
                 theme="streamlit",
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
-                # height=min(700, 40*len(det_df_ag)+160),
-                height=TABLE_SCROLL_HEIGHT,             # ← 고정 높이(스크롤 생김)
-                key="stock_detail_main_table",  # 상태 충돌 방지용 키
+                height=TABLE_SCROLL_HEIGHT,
+                key="stock_detail_main_table",
+                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
             )
 
             sel = grid.get("selected_rows", [])
 
-            # 선택된 행이 있으면 바로 아래에 "근거 + 재무스냅샷 + 링크" 표시
             def _pick_first(sel):
                 if isinstance(sel, list):
                     return sel[0] if sel else None
@@ -966,9 +978,8 @@ with tab_stock:
 
                 p_stock  = picked.get("종목","")
                 p_ticker = picked.get("티커","")
-                # --- 추가: 티커 비어 있으면 같은 종목의 다른 문서에서 보완 ---
                 if not p_ticker:
-                    for _r in stock_docs:  # 같은 '종목별 검색' 결과 안에서
+                    for _r in stock_docs:
                         t = str(_r.get("ticker") or "").strip()
                         s = (_r.get("stock") or "").strip()
                         if s == p_stock and t:
@@ -985,13 +996,11 @@ with tab_stock:
                 c2.markdown(f"**증권사**: {p_broker}")
                 c3.markdown(f"**애널리스트**: {p_anl}")
                 c4.markdown(f"**리포트일**: {p_date}")
-                # st.markdown(f"[PDF 열기]({_norm_url(p_pdf)})  |  [상세페이지 열기]({_norm_url(p_det)})")
 
                 # (A) 동일 애널리스트 근거 — 랭킹 탭과 같은 형식으로
                 st.markdown("#### 📄 해당 애널리스트의 근거 내역")
                 with st.spinner("애널리스트 상세 로딩..."):
                     items = load_detail_for_analyst(p_anl, p_broker, date_from, date_to)
-                    # === 추가: 근거 상단 요약 (Reports / RankScore / Coverage) ===
                     reports_n = len(items)
                     total_pts = 0.0
                     dates = []
@@ -1055,12 +1064,10 @@ with tab_stock:
                     st.info("선택한 애널리스트의 상세 근거가 없습니다.")
 
                 # (B) 종목 재무 스냅샷 + 네이버 링크
-                # (교체) 종목 재무 스냅샷 → 링크만
                 st.markdown("#### 📈 종목 정보")
                 st.markdown(f"[네이버 금융 상세 보기]({naver_item_url(p_ticker)})")
 
         else:
             # Ag-Grid가 없으면 기존 st.dataframe만 표시 (클릭 기능 없음)
-            # st.dataframe(det_df, use_container_width=True)
             st.dataframe(det_df, use_container_width=True, height=TABLE_SCROLL_HEIGHT)
             st.info("행 클릭(선택)을 사용하려면 `streamlit-aggrid` 설치가 필요합니다.")
