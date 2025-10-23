@@ -8,18 +8,32 @@
 - Ag-Grid 선택값이 list/DF 모두에서 안전하게 동작
 """
 
-# 파일 최상단 근처, 프로세스(인스턴스)당 1회만 실행
-import streamlit as st, pandas as pd
-from st_aggrid import AgGrid
+# !!! 파일 최상단, 어떤 UI/레이아웃 코드보다 위 !!!
+import os, streamlit as st, pandas as pd
+from st_aggrid import AgGrid, grid_options_builder
+import st_aggrid as _ag
+
 if not hasattr(st, "_aggrid_warmed"):
+    comp_dir = os.path.join(os.path.dirname(_ag.__file__), "frontend", "build")
+    print("[BOOT] st_aggrid at:", os.path.dirname(_ag.__file__))
+    print("[BOOT] st_aggrid frontend exists:", os.path.exists(os.path.join(comp_dir, "index.html")))
     ph = st.empty()
     with ph.container():
-        AgGrid(pd.DataFrame({"_":[]}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
+        AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
     ph.empty()
     st._aggrid_warmed = True
+    print("[BOOT] AgGrid warmup done")
 
-# import streamlit as st
-# st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+# 전역 웜업 바로 아래 어딘가에
+import time
+if not st.session_state.get("_first_paint_done"):
+    # 50~150ms 정도만 쉬어도 초기 레이스가 싹 사라지는 경우가 많습니다.
+    time.sleep(0.1)
+    st.session_state["_first_paint_done"] = True
+
+
+import streamlit as st
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 # 
 # # 웜업 렌더 (컴포넌트 초기화)
 # try:
