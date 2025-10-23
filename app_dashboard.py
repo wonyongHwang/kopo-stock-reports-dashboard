@@ -20,6 +20,34 @@ import pytz
 from google.cloud import firestore
 import os
 
+import streamlit as st
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+
+# 웜업 렌더 (컴포넌트 초기화)
+try:
+    from st_aggrid import AgGrid
+    import pandas as pd
+
+    # 메시지를 표시할 자리 확보
+    init_msg = st.sidebar.empty()
+    init_msg.caption("🔄 컴포넌트 초기화 중...")
+
+    # 실제 웜업 렌더
+    AgGrid(
+        pd.DataFrame({"_": []}),
+        theme="streamlit",
+        height=1,
+        fit_columns_on_grid_load=True,
+        key="__aggrid_warmup__",
+        enable_enterprise_modules=False,
+    )
+
+    # 완료 메시지로 교체
+    init_msg.caption("✅ 컴포넌트 초기화 완료")
+
+except Exception as e:
+    st.sidebar.error(f"⚠️ 웜업 실패: {e}")
+
 # -----------------------------
 # 운영 안정화: 캐시/통계/파일워처
 # -----------------------------
