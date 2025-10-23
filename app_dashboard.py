@@ -8,65 +8,73 @@
 - Ag-Grid 선택값이 list/DF 모두에서 안전하게 동작
 """
 
+# 파일 최상단 근처, 프로세스(인스턴스)당 1회만 실행
+import streamlit as st, pandas as pd
+from st_aggrid import AgGrid
+if not hasattr(st, "_aggrid_warmed"):
+    ph = st.empty()
+    with ph.container():
+        AgGrid(pd.DataFrame({"_":[]}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
+    ph.empty()
+    st._aggrid_warmed = True
+
+import streamlit as st
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+# 
+# # 웜업 렌더 (컴포넌트 초기화)
+# try:
+#     from st_aggrid import AgGrid
+#     import pandas as pd
+
+#     # 메시지를 표시할 자리 확보
+#     init_msg = st.sidebar.empty()
+#     init_msg.caption("🔄 컴포넌트 초기화 중...")
+
+#     # 실제 웜업 렌더
+#     AgGrid(
+#         pd.DataFrame({"_": []}),
+#         theme="streamlit",
+#         height=1,
+#         fit_columns_on_grid_load=True,
+#         key="__aggrid_warmup__",
+#         enable_enterprise_modules=False,
+#     )
+
+#     # 완료 메시지로 교체
+#     init_msg.caption("✅ 컴포넌트 초기화 완료")
+
+# except Exception as e:
+#     st.sidebar.error(f"⚠️ 웜업 실패: {e}")
+
+
 import math
 import datetime as dt
 from typing import List, Dict, Any
 import re
-import time
+import time  # ← 중복 import 정리 (dt는 위에서)
 
 import streamlit as st
 import pandas as pd
 import pytz
 from google.cloud import firestore
 import os
-
-import streamlit as st
-st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
-
-# 웜업 렌더 (컴포넌트 초기화)
-try:
-    from st_aggrid import AgGrid
-    import pandas as pd
-
-    # 메시지를 표시할 자리 확보
-    init_msg = st.sidebar.empty()
-    init_msg.caption("🔄 컴포넌트 초기화 중...")
-
-    # 실제 웜업 렌더
-    AgGrid(
-        pd.DataFrame({"_": []}),
-        theme="streamlit",
-        height=1,
-        fit_columns_on_grid_load=True,
-        key="__aggrid_warmup__",
-        enable_enterprise_modules=False,
-    )
-
-    # 완료 메시지로 교체
-    init_msg.caption("✅ 컴포넌트 초기화 완료")
-
-except Exception as e:
-    st.sidebar.error(f"⚠️ 웜업 실패: {e}")
-
-# -----------------------------
-# 운영 안정화: 캐시/통계/파일워처
-# -----------------------------
 os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
-# 운영환경 권장: 파일 변경 감시를 'poll'로 (none은 일부 환경에서 세션/컴포넌트 초기화 타이밍 이슈)
-os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "poll")
+# Streamlit 1.29+는 아래도 지원
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 
 
-
-# ====== Ag-Grid 옵션 / 임포트 가시화 ======
+# ====== Ag-Grid 옵션 ======
 _AGGRID_AVAILABLE = True
-_AGGRID_ERROR = None
 try:
-    import st_aggrid as _st_aggrid_pkg  # 패키지 경로/자산 헬스체크용
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-except Exception as e:
+except Exception:
     _AGGRID_AVAILABLE = False
-    _AGGRID_ERROR = e
+
+# == debugging for 404
+
+
+
 
 # 표 스크롤 높이(픽셀)
 TABLE_SCROLL_HEIGHT = 520  # 필요하면 420~680 사이로 조절
@@ -482,19 +490,6 @@ def get_last_updated_from_docs(docs):
 # -----------------------------
 # st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 분석")
-
-# --- st_aggrid 헬스체크(사이드바에서만 노출; 운영 중 이슈 파악용) ---
-with st.sidebar.expander("디버그 · st_aggrid 상태", expanded=False):
-    if not _AGGRID_AVAILABLE:
-        st.error(f"st_aggrid import 실패: {type(_AGGRID_ERROR).__name__}: {_AGGRID_ERROR}")
-    else:
-        try:
-            from pathlib import Path
-            comp_index = Path(_st_aggrid_pkg.__file__).parent / "frontend" / "build" / "index.html"
-            st.caption(f"AgGrid frontend exists: {comp_index.exists()} · {comp_index}")
-        except Exception as e:
-            st.warning(f"AgGrid 자산 경로 확인 실패: {e}")
-
 # --- Tabs 시인성 향상 (CSS 스타일 주입: 최소 변경) ---
 st.markdown("""
 <style>
@@ -513,7 +508,7 @@ div[data-testid="stTabs"] button[role="tab"] {
   color: #495057;
   background: #f8f9fa;
   border: 1px solid #e9ecef;
-  border-bottom: none;
+  border-bottom: none; /* 아래쪽은 콘텐츠 카드와 연결되므로 없앰 */
   border-top-left-radius: 8px;
   border-top-right-radius: 8px;
   padding: 10px 14px;
@@ -531,13 +526,13 @@ div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
   background: #ffffff;
   color: #212529;
   border-color: #dee2e6;
-  box-shadow: inset 0 -4px 0 0 #0d6efd;
+  box-shadow: inset 0 -4px 0 0 #0d6efd; /* 상단 파란 강조선(브랜드 컬러 느낌) */
 }
 
 /* 탭 패널(내용) 카드 스타일 */
 div[data-testid="stTabs"] > div[data-baseweb="tab-panel"] {
   border: 1px solid #dee2e6;
-  border-top: none;
+  border-top: none; /* 활성 탭 버튼과 자연스럽게 이어지도록 */
   border-radius: 0 10px 10px 10px;
   padding: 16px 16px 10px 16px;
   background: #ffffff;
@@ -705,6 +700,7 @@ with tab_rank:
         st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
         # Ag-Grid 렌더링 (선택 안정화)
+        selected_idx = None
         _show_df = show_df.reset_index(drop=True).copy()
         ROW_H, HEAD_H, PADDING = 34, 40, 32
         GRID_H = min(HEAD_H + ROW_H * len(_show_df) + PADDING, HEAD_H + ROW_H * 25 + 400)
@@ -738,7 +734,7 @@ with tab_rank:
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
                 height=GRID_H,
-                enable_enterprise_modules=False,  # ← Enterprise 경고/자산 로드 방지
+                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
             )
             sel = grid.get("selected_rows", [])
             if _aggrid_selected_empty(sel):
@@ -977,18 +973,30 @@ with tab_stock:
         if _AGGRID_AVAILABLE and not det_df.empty:
             det_df_ag = det_df.reset_index(drop=True).copy()
             det_df_ag.insert(0, "_row", det_df_ag.index)   # 내부키
+
+            # ✅ 페이지 크기 선택 UI (세션 유지)
+            page_size = st.selectbox(
+                "상세 내역 페이지 크기",
+                options=[25, 50, 100, 200],
+                index=1,
+                key="detail_page_size"
+            )
+
             gb = GridOptionsBuilder.from_dataframe(det_df_ag)
 
-            # 숫자 컬럼 폭 줄이기(대략)
+            # 숫자 컬럼 폭/타입(기존 유지)
             gb.configure_column("목표가", width=110, type=["numericColumn"])
             gb.configure_column("마지막종가", width=110, type=["numericColumn"])
             gb.configure_column("레이팅", width=110)
 
+            # 단일 선택 + 내부키 숨김
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_column("_row", header_name="", hide=True)
-            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=50)
 
-            # ⬇️ Community 고정: 엔터프라이즈 기능 OFF
+            # ✅ Ag-Grid 내장 페이지네이션
+            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+
+            # 커뮤니티 기능만 (엔터프라이즈 경고 방지)
             gb.configure_default_column(
                 editable=False,
                 groupable=False,
@@ -1009,13 +1017,14 @@ with tab_stock:
                 theme="streamlit",
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
-                height=TABLE_SCROLL_HEIGHT,
+                height=TABLE_SCROLL_HEIGHT,        # 스크롤 영역
                 key="stock_detail_main_table",
-                enable_enterprise_modules=False,  # ← Enterprise 경고/자산 로드 방지
+                enable_enterprise_modules=False,    # 엔터프라이즈 경고 방지
             )
 
             sel = grid.get("selected_rows", [])
 
+            # 선택 행 없으면 첫 행 자동 선택(재실행에도 UX 안정)
             def _pick_first(sel):
                 if isinstance(sel, list):
                     return sel[0] if sel else None
@@ -1025,7 +1034,8 @@ with tab_stock:
 
             picked = _pick_first(sel)
             if not picked and not det_df_ag.empty:
-                picked = det_df_ag.iloc[0].to_dict()  # ← 첫 행 자동 픽
+                picked = det_df_ag.iloc[0].to_dict()
+
             if picked:
                 st.markdown("---")
                 st.markdown("#### 📌 선택 리포트 상세")
@@ -1051,7 +1061,7 @@ with tab_stock:
                 c3.markdown(f"**애널리스트**: {p_anl}")
                 c4.markdown(f"**리포트일**: {p_date}")
 
-                # (A) 동일 애널리스트 근거 — 랭킹 탭과 같은 형식으로
+                # (A) 동일 애널리스트 근거 — 랭킹 탭과 같은 형식
                 st.markdown("#### 📄 해당 애널리스트의 근거 내역")
                 with st.spinner("애널리스트 상세 로딩..."):
                     items = load_detail_for_analyst(p_anl, p_broker, date_from, date_to)
@@ -1122,6 +1132,13 @@ with tab_stock:
                 st.markdown(f"[네이버 금융 상세 보기]({naver_item_url(p_ticker)})")
 
         else:
-            # Ag-Grid가 없으면 기존 st.dataframe만 표시 (클릭 기능 없음)
-            st.dataframe(det_df, use_container_width=True, height=TABLE_SCROLL_HEIGHT)
+            # st.dataframe 폴백일 때도 수동 페이지네이션 제공
+            per_page = st.selectbox("상세 내역 페이지 크기", [25, 50, 100, 200], index=1, key="detail_page_size_fallback")
+            total = len(det_df)
+            total_pages = (total + per_page - 1) // per_page
+            page = st.number_input("페이지", 1, max(1, total_pages), 1, key="detail_page_num_fallback")
+            start = (page - 1) * per_page
+            end = min(start + per_page, total)
+            st.caption(f"Page {page}/{total_pages} · Rows {start+1}-{end} / {total}")
+            st.dataframe(det_df.iloc[start:end], use_container_width=True, height=TABLE_SCROLL_HEIGHT)
             st.info("행 클릭(선택)을 사용하려면 `streamlit-aggrid` 설치가 필요합니다.")
