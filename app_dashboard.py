@@ -480,7 +480,7 @@ def get_last_updated_from_docs(docs):
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+# st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 분석")
 
 # --- st_aggrid 헬스체크(사이드바에서만 노출; 운영 중 이슈 파악용) ---
