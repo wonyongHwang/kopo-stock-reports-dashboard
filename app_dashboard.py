@@ -1,18 +1,35 @@
 # -*- coding: utf-8 -*-
 """
 종목리포트 평가 대시보드 (완성본; 기존 기능 유지)
-- 탭1: 🏆 종목리포트 평가 랭킹보드 (행 선택 → 하단 상세 근거 표시, 페이지네이션 포함)
-- 탭2: 🔎 종목별 검색 (종목/티커로 조회, 증권사/애널리스트 요약 + 상세)
-- 면책 조항 / 평가 반영 기간 & 최근 반영 시각 표기
-- 브로커/애널리스트 공백 제거 정규화
-- Ag-Grid 선택값이 list/DF 모두에서 안전하게 동작
+- 탭1: 🏆 종목리포트 평가 랭킹보드
+- 탭2: 🔎 종목별 검색
 """
 
-# !!! 파일 최상단, 어떤 UI/레이아웃 코드보다 위 !!!
-import os, streamlit as st, pandas as pd
-from st_aggrid import AgGrid, grid_options_builder
+# 0) 표준/환경 설정 — Streamlit import 전에
+import os
+os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
+os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
+
+# 1) Streamlit import + set_page_config (파일 최초의 st.* 호출)
+import streamlit as st
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+
+# 2) 나머지 라이브러리 import
+import re
+import math
+import time
+import datetime as dt
+from typing import List, Dict, Any
+import pandas as pd
+import pytz
+from google.cloud import firestore
+
+# st_aggrid는 한 번만 정확한 이름으로 import
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import st_aggrid as _ag
 
+# 3) AgGrid 전역 1회 웜업 (set_page_config 이후, 어떤 UI 렌더보다 먼저)
 if not hasattr(st, "_aggrid_warmed"):
     comp_dir = os.path.join(os.path.dirname(_ag.__file__), "frontend", "build")
     print("[BOOT] st_aggrid at:", os.path.dirname(_ag.__file__))
@@ -24,41 +41,13 @@ if not hasattr(st, "_aggrid_warmed"):
     st._aggrid_warmed = True
     print("[BOOT] AgGrid warmup done")
 
-# 전역 웜업 바로 아래 어딘가에
-import time
+# 4) (선택) 초기 프레임 레이스 완화를 위한 1프레임 지연
 if not st.session_state.get("_first_paint_done"):
-    # 50~150ms 정도만 쉬어도 초기 레이스가 싹 사라지는 경우가 많습니다.
-    time.sleep(0.1)
+    time.sleep(0.1)  # 50~150ms 사이 권장
     st.session_state["_first_paint_done"] = True
 
+# --- 여기부터 기존 코드 이어서 붙이세요 (유틸/함수/Firestore 등) ---
 
-import streamlit as st
-st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
-# 
-# # 웜업 렌더 (컴포넌트 초기화)
-# try:
-#     from st_aggrid import AgGrid
-#     import pandas as pd
-
-#     # 메시지를 표시할 자리 확보
-#     init_msg = st.sidebar.empty()
-#     init_msg.caption("🔄 컴포넌트 초기화 중...")
-
-#     # 실제 웜업 렌더
-#     AgGrid(
-#         pd.DataFrame({"_": []}),
-#         theme="streamlit",
-#         height=1,
-#         fit_columns_on_grid_load=True,
-#         key="__aggrid_warmup__",
-#         enable_enterprise_modules=False,
-#     )
-
-#     # 완료 메시지로 교체
-#     init_msg.caption("✅ 컴포넌트 초기화 완료")
-
-# except Exception as e:
-#     st.sidebar.error(f"⚠️ 웜업 실패: {e}")
 
 
 import math
