@@ -18,8 +18,8 @@ if not hasattr(st, "_aggrid_warmed"):
     ph.empty()
     st._aggrid_warmed = True
 
-import streamlit as st
-st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+# import streamlit as st
+# st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 # 
 # # 웜업 렌더 (컴포넌트 초기화)
 # try:
