@@ -11,17 +11,46 @@ os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 
-# 1) Streamlit import + set_page_config (파일 최초의 st.* 호출)
+# --- Boot state machine: 세션 → 웜업 → 본 UI ---
 import streamlit as st
-st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
-if not st.session_state.get("_post_boot_rerun"):
-    st.session_state["_post_boot_rerun"] = True
-    # 첫 프레임에서는 컴포넌트 렌더를 막고 즉시 리런 → 두 번째 프레임에서만 렌더
-    st.info("초기화 중…")
-    st.experimental_rerun()
-REV = os.getenv("GIT_SHA") or os.getenv("K_REVISION") or "r1"
-if st.query_params.get("_v") != REV:
-    st.query_params["_v"] = REV  # URL에 ?_v=REV 추가 → streamlitUrl 파라미터에도 반영됨
+
+if "boot_phase" not in st.session_state:
+    st.session_state.boot_phase = 0  # 0: attach session only, 1: do warmup, 2+: run app
+
+phase = st.session_state.boot_phase
+
+if phase == 0:
+    # 프레임 1: 세션만 붙이고 종료 (컴포넌트/쿼리 파라미터/리런 호출 금지)
+    st.session_state.boot_phase = 1
+    st.caption("초기화 준비 중…")
+    st.stop()
+
+elif phase == 1:
+    # 프레임 2: 여기서만 전역 웜업을 수행 → 컴포넌트 라우트 등록
+    import pandas as pd
+    try:
+        from st_aggrid import AgGrid
+        ph = st.empty()
+        with ph.container():
+            AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
+        ph.empty()
+        setattr(st, "_aggrid_warmed", True)
+    except Exception as e:
+        st.warning(f"웜업 실패: {e}")  # 실패해도 본 UI는 막음(다음 프레임에서 재시도 가능)
+    # 캐시버스터/쿼리파라미터 변경은 여기서!
+    import os
+    REV = os.getenv("K_REVISION") or os.getenv("GIT_SHA") or "r1"
+    if hasattr(st, "query_params"):
+        if st.query_params.get("_v") != REV:
+            st.query_params["_v"] = REV
+    else:
+        st.experimental_set_query_params(_v=REV)
+
+    st.session_state.boot_phase = 2
+    st.experimental_rerun()  # 프레임 3으로 진입
+
+# phase >= 2 에서만 본 UI/AgGrid를 렌더
+
     
 # 2) 나머지 라이브러리 import
 import re
