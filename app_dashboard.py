@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-종목리포트 평가 대시보드 (완성본; 기존 기능 유지)
+종목리포트 평가 대시보드 (A안: st.data_editor 기반, 컴포넌트/iframe 제거)
 - 탭1: 🏆 종목리포트 평가 랭킹보드
 - 탭2: 🔎 종목별 검색
 """
@@ -11,9 +11,9 @@ os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 
-import time
 import re
 import math
+import time
 import datetime as dt
 from typing import List, Dict, Any
 
@@ -22,81 +22,76 @@ import pytz
 import streamlit as st
 from google.cloud import firestore
 
-# st_aggrid는 한 번만 정확한 이름으로 import
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-import st_aggrid as _ag
 
 # 1) 가장 먼저 page_config
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 
-# 2) 부트 게이트: 최대 1회만 리런 (원치 않으면 블록 전체 주석 처리 가능)
-def boot_gate():
-    phase = st.session_state.get("_boot_phase", 0)
-    if phase == 0:
-        # 첫 프레임: 세션만 붙이고 한 번만 리런
-        st.session_state["_boot_phase"] = 1
-        st.rerun()
-    elif phase == 1:
-        # 두 번째 프레임: 전역 1회 웜업(컴포넌트 라우트 등록) — iframe은 아직 만들지 않음
-        try:
-            ph = st.empty()
-            with ph.container():
-                AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
-            ph.empty()
-            st.session_state["_aggrid_ready"] = True
-        except Exception:
-            st.session_state["_aggrid_ready"] = False
-        st.session_state["_boot_phase"] = 2
-        # 여기서 추가 리런은 하지 않음(리런 과다 → Bad message format 유발)
+
+# 2) 안전 테이블 렌더 헬퍼 (AgGrid 대체)
+def render_safe_table(
+    df: pd.DataFrame,
+    key: str,
+    page_size: int = 25,
+    selectable: bool = True,
+    auto_pick_first: bool = True,
+    height: int | None = None,
+    column_config: dict | None = None,
+):
+    """
+    - data_editor 기반 페이지네이션 + (옵션) 단일행 선택(체크박스)
+    - 반환: (현재 페이지 DF, 선택행(dict)|None)
+    """
+    if df is None or df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return None, None
+
+    total = len(df)
+    total_pages = (total + page_size - 1) // page_size
+    page = st.number_input("Page", 1, max(1, total_pages), 1, key=f"{key}_page")
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+    st.caption(f"Page {page}/{total_pages} · Rows {start+1}-{end} / {total}")
+
+    view = df.iloc[start:end].copy().reset_index(drop=True)
+
+    picked_row = None
+    if selectable:
+        pick_col = "__pick__"
+        if pick_col not in view.columns:
+            view.insert(0, pick_col, False)
+        if auto_pick_first and len(view) > 0:
+            view.at[0, pick_col] = True
+
+        edited = st.data_editor(
+            view,
+            key=f"{key}_editor_{page}",
+            hide_index=True,
+            use_container_width=True,
+            height=height,
+            column_config=column_config or {},
+        )
+        sel_df = edited[edited[pick_col] == True].drop(columns=[pick_col], errors="ignore")
+        if not sel_df.empty:
+            picked_row = sel_df.iloc[0].to_dict()
+        return edited.drop(columns=[pick_col], errors="ignore"), picked_row
+
     else:
-        return
-
-boot_gate()
-
-def aggrid_can_render(delay_ms_mobile=350, delay_ms_desktop=120) -> bool:
-    """AgGrid 렌더 최종 체크 + 렌더 직전 짧은 지연(모바일은 더 길게)."""
-    if st.session_state.get("_boot_phase", 0) < 2:
-        return False
-    # 모바일 여부: 사이드바 토글로 제어(기본 True 권장)
-    is_mobile = st.session_state.get("_is_mobile", True)
-    time.sleep((delay_ms_mobile if is_mobile else delay_ms_desktop) / 1000.0)
-    return True
-
-def aggrid_gate(tab_key: str, button_label: str) -> bool:
-    """
-    모바일 안정화를 위해 '표 로드' 버튼을 누른 뒤에만 AgGrid를 생성.
-    데스크톱은 곧바로 렌더(원한다면 동일 UX로 바꿀 수 있음).
-    """
-    is_mobile = st.session_state.get("_is_mobile", True)
-    flag_key = f"__load_{tab_key}__"
-
-    if is_mobile and not st.session_state.get(flag_key, False):
-        col = st.columns([1,1,1])[1]
-        with col:
-            if st.button(button_label, use_container_width=True, type="primary"):
-                st.session_state[flag_key] = True
-                st.rerun()
-        st.info("모바일 안정화를 위해 버튼을 눌러 표를 로드하세요.")
-        return False
-
-    return aggrid_can_render()
-
-# ==== 여기까지 공통 부트스트랩 ====
+        st.data_editor(
+            view,
+            key=f"{key}_editor_{page}",
+            hide_index=True,
+            use_container_width=True,
+            height=height,
+            disabled=True,
+            column_config=column_config or {},
+        )
+        return view, None
 
 
-# ====== Ag-Grid 옵션 가용성 ======
-_AGGRID_AVAILABLE = True
-try:
-    from st_aggrid import AgGrid  # 이미 import됨(안전차원)
-except Exception:
-    _AGGRID_AVAILABLE = False
+# ====== 유틸 ======
+TABLE_SCROLL_HEIGHT = 520
+KST = pytz.timezone("Asia/Seoul")
 
-# 표 스크롤 높이(픽셀)
-TABLE_SCROLL_HEIGHT = 520  # 필요시 조절
-
-# -----------------------------
-# 정규화 & 유틸
-# -----------------------------
 def naver_item_url(ticker: str | None) -> str:
     t = (ticker or "").strip()
     if not t or len(t) != 6:
@@ -140,8 +135,6 @@ def _norm_url(x: str) -> str:
         return s
     return "https://" + s
 
-KST = pytz.timezone("Asia/Seoul")
-
 def format_ts(ts, tz=KST):
     if not ts:
         return "-"
@@ -157,18 +150,12 @@ def format_ts(ts, tz=KST):
     return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 def _aggrid_selected_empty(sel) -> bool:
-    if isinstance(sel, list):
-        return len(sel) == 0
-    if isinstance(sel, pd.DataFrame):
-        return sel.empty
+    # 사용 중단(호환 위해 남김): 이제 render_safe_table이 선택 처리
     return True
 
 def _aggrid_pick_first(sel):
-    if isinstance(sel, list):
-        return sel[0] if sel else None
-    if isinstance(sel, pd.DataFrame):
-        return sel.iloc[0].to_dict() if not sel.empty else None
     return None
+
 
 # -----------------------------
 # Firestore Client
@@ -177,7 +164,6 @@ def _aggrid_pick_first(sel):
 def get_db():
     return firestore.Client()
 
-# --- analyst_reports에서 title 배치 조회 (report_id -> title 매핑) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
     db = get_db()
@@ -224,6 +210,7 @@ def _title_from_map_or_fields(rec: dict, title_map: dict[str, str] | None = None
     rdate = (rec.get("report_date") or "").strip()
     return f"{stock or '리포트'} ({rdate or '-'})"
 
+
 # -----------------------------
 # 데이터 로드
 # -----------------------------
@@ -239,8 +226,8 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
         want_max_excl = (date_to + dt.timedelta(days=1)).isoformat() if date_to else None
 
         q = db.collection_group("by_analyst")
-        if want_min:      q = q.where("report_date", ">=", want_min)
-        if want_max_excl: q = q.where("report_date", "<",  want_max_excl)
+        if want_min:     q = q.where("report_date", ">=", want_min)
+        if want_max_excl:q = q.where("report_date", "<",  want_max_excl)
         q = q.limit(limit)
         docs_raw = list(q.stream())
         server_filtered = True
@@ -253,7 +240,6 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
     for d in docs_raw:
         x = d.to_dict() or {}
         broker_norm = normalize_broker_name((x.get("broker") or "").strip())
-        # ✅ '한국IR협의회' 제외 + '평가' 라벨 배제
         if broker_norm == "한국IR협의회" or "평가" in broker_norm:
             continue
         if broker_set and broker_norm not in broker_set:
@@ -279,7 +265,6 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
         if x.get("points_total") is None and x.get("horizons"):
             x["points_total"] = sum(float(h.get("points_total_this_horizon") or 0.0) for h in x.get("horizons") or [])
         out.append(x)
-
     return out
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -324,6 +309,7 @@ def load_detail_for_analyst(analyst_name: str, broker: str,
     uniq.sort(key=lambda r: r.get("report_date",""), reverse=True)
     return uniq
 
+
 # -----------------------------
 # 집계 & 테이블 변환
 # -----------------------------
@@ -341,7 +327,7 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
         rdate = (x.get("report_date") or "").strip()
         key = f"{name_norm}|{broker}"
         agg[key]["sum"] += pts
-        agg[key]["n"]  += 1
+        agg[key]["n"] += 1
         if not agg[key]["name_disp"]:
             agg[key]["name_disp"] = name_raw or "(unknown)"
         agg[key]["broker"] = broker
@@ -352,7 +338,8 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
                 agg[key]["last"]  = rdate
     rows = []
     for _, v in agg.items():
-        if v["n"] < min_reports: continue
+        if v["n"] < min_reports: 
+            continue
         score = (v["sum"]/v["n"]) if metric == "avg" else v["sum"]
         rows.append({
             "RankScore": round(score, 4),
@@ -398,6 +385,7 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     horizons = rec.get("horizons") or []
     rating_norm = rec.get("rating_norm") or rec.get("rating")
     target_price = rec.get("target_price")
+
     for h in horizons:
         desired = _desired_from_horizon(h)
         ret = h.get("return_pct", None)
@@ -478,17 +466,17 @@ def get_last_updated_from_docs(docs):
             latest = t
     return latest
 
+
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 st.title("📊 종목리포트 분석")
 
-# --- Tabs 시인성 향상 (CSS 스타일 주입: 최소 변경) ---
+# --- Tabs 스타일 (기존 유지) ---
 st.markdown("""
 <style>
 div[data-testid="stTabs"] div[role="tablist"] {
-  border-bottom: 2px solid #e9ecef;
-  gap: 8px; padding-bottom: 2px; margin-bottom: 8px;
+  border-bottom: 2px solid #e9ecef; gap: 8px; padding-bottom: 2px; margin-bottom: 8px;
 }
 div[data-testid="stTabs"] button[role="tab"] {
   font-weight: 600; font-size: 0.95rem; color: #495057;
@@ -498,8 +486,7 @@ div[data-testid="stTabs"] button[role="tab"] {
 }
 div[data-testid="stTabs"] button[role="tab"]:hover { background: #f1f3f5; color: #343a40; }
 div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-  background: #ffffff; color: #212529; border-color: #dee2e6;
-  box-shadow: inset 0 -4px 0 0 #0d6efd;
+  background: #ffffff; color: #212529; border-color: #dee2e6; box-shadow: inset 0 -4px 0 0 #0d6efd;
 }
 div[data-testid="stTabs"] > div[data-baseweb="tab-panel"] {
   border: 1px solid #dee2e6; border-top: none; border-radius: 0 10px 10px 10px;
@@ -512,9 +499,6 @@ div[data-testid="stTabs"] button[role="tab"] p { line-height: 1.1; margin: 0; }
 # ---- 사이드바 ----
 with st.sidebar:
     st.header("공통 필터")
-    # 모바일 안정화 모드 토글(권장: True)
-    st.session_state["_is_mobile"] = st.toggle("모바일 안정화 모드", value=st.session_state.get("_is_mobile", True))
-
     today = dt.date.today()
     default_from = today - dt.timedelta(days=90)
     date_from = st.date_input("From date", value=default_from)
@@ -526,7 +510,6 @@ with st.sidebar:
 
     st.caption("※ 기간/브로커를 좁힐수록 빠릅니다. 점수는 리포트별 points_total 합계(또는 평균)를 사용합니다.")
 
-    # 기간 기준으로 문서 로드 → 이용 가능한 브로커 집합/건수 계산
     base_docs = load_analyst_docs(date_from, date_to, brokers=None, limit=max_docs)
     broker_counts = {}
     for d in base_docs:
@@ -568,7 +551,9 @@ st.markdown(
 date_values = [str(d.get("report_date", "")).strip() for d in docs if str(d.get("report_date","")).strip()]
 if date_values:
     try:
-        st.markdown(f"**평가 반영 기간** {min(date_values)} ~ {max(date_values)}")
+        min_date = min(date_values)
+        max_date = max(date_values)
+        st.markdown(f"**평가 반영 기간** {min_date} ~ {max_date}")
     except Exception:
         st.markdown("**평가 반영 기간** - ~ -")
 else:
@@ -605,6 +590,7 @@ if is_today_range:
         rows = [s.to_dict() or {} for s in q_ar.stream()]
     except Exception:
         rows = []
+
     seen = set((
         str(x.get("report_id") or ""),
         normalize_broker_name(x.get("broker") or ""),
@@ -615,16 +601,13 @@ if is_today_range:
     for x in rows:
         rd = (x.get("report_date") or x.get("pred_time") or "")
         x["report_date"] = str(rd)[:10] if rd else ""
-
         b = normalize_broker_name(x.get("broker") or "")
         if b == "한국IR협의회":
             continue
         x["broker"] = b
-
         a_raw = (x.get("analyst_name") or x.get("analyst") or "").strip()
         x["analyst_name"] = a_raw
         x["analyst_name_norm"] = x.get("analyst_name_norm") or normalize_analyst_name(a_raw)
-
         k = (str(x.get("report_id") or ""), b, a_raw, x["report_date"])
         if k in seen:
             continue
@@ -637,7 +620,7 @@ if is_today_range:
 tab_rank, tab_stock = st.tabs(["🏆 종목리포트 평가 랭킹보드", "🔎 종목별 검색"])
 
 # ===============================
-# 탭1: 랭킹보드
+# 탭1: 랭킹보드 (페이지네이션 + 단일 선택)
 # ===============================
 with tab_rank:
     st.subheader("🏆 Top Analysts")
@@ -646,110 +629,59 @@ with tab_rank:
     if rank_df.empty:
         st.info("조건에 맞는 데이터가 없습니다. 기간/브로커/최소 리포트 수를 조정하세요.")
     else:
-        # 모바일은 버튼 눌러 로드 → 데스크톱은 즉시
-        if not aggrid_gate("rank", "랭킹 표 로드"):
-            st.stop()
-
         per_page = st.selectbox("Rows per page", [10, 25, 50, 100], index=1, key="rank_rows_per_page")
-        page = st.number_input("Page", 1, 9999, 1, key="rank_page")
-        total_pages = max(1, math.ceil(len(rank_df) / per_page))
-        page = min(page, total_pages)
-        start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
-        show_df = rank_df.iloc[start:end].copy()
-        st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
-        selected_idx = None
-        _show_df = show_df.reset_index(drop=True).copy()
-        ROW_H, HEAD_H, PADDING = 34, 40, 32
-        GRID_H = min(HEAD_H + ROW_H * len(_show_df) + PADDING, HEAD_H + ROW_H * 25 + 400)
+        # 데이터 에디터로 교체
+        _show_df = rank_df.reset_index(drop=True).copy()
+        rank_view, rank_pick = render_safe_table(
+            _show_df,
+            key="rank_table",
+            page_size=per_page,
+            selectable=True,
+            auto_pick_first=False,
+            height=None,
+        )
 
-        if _AGGRID_AVAILABLE and not _show_df.empty:
-            _show_df.insert(0, "_row", _show_df.index)
-            gb = GridOptionsBuilder.from_dataframe(_show_df)
-            gb.configure_selection(selection_mode="single", use_checkbox=False)
-            gb.configure_grid_options(rowHeight=ROW_H, headerHeight=HEAD_H)
-            gb.configure_column("_row", header_name="", hide=True)
-            gb.configure_default_column(
-                editable=False, groupable=False, enableValue=False, enableRowGroup=False, enablePivot=False,
-            )
-            try:
-                gb.configure_side_bar(False)
-            except Exception:
-                pass
-
-            grid = AgGrid(
-                _show_df,
-                gridOptions=gb.build(),
-                update_mode=GridUpdateMode.SELECTION_CHANGED,
-                data_return_mode=DataReturnMode.AS_INPUT,
-                theme="streamlit",
-                allow_unsafe_jscode=True,
-                fit_columns_on_grid_load=True,
-                height=GRID_H,
-                enable_enterprise_modules=False,
-            )
-            sel = grid.get("selected_rows", [])
-            if _aggrid_selected_empty(sel):
-                st.info("상단 표에서 행을 클릭(선택)하세요.")
-            else:
-                picked = _aggrid_pick_first(sel)
-                if not picked:
-                    st.info("선택 행을 해석할 수 없습니다. 다시 선택해 주세요.")
-                else:
-                    picked_name = picked.get("Analyst", "Unknown Analyst")
-                    picked_broker = picked.get("Broker", "Unknown Broker")
-                    st.markdown(f"### {picked_name} — {picked_broker}")
-                    st.write(f"**Reports:** {picked.get('Reports', '-') } | **RankScore:** {picked.get('RankScore', '-') }")
-                    st.write(f"**Coverage:** {picked.get('FirstReport', '-') } → {picked.get('LastReport', '-') }")
-
-                    with st.spinner("Loading evidence..."):
-                        items = load_detail_for_analyst(picked_name, picked_broker, date_from, date_to)
-
-                    if not items:
-                        st.info("상세 데이터가 없습니다.")
-                    else:
-                        evidence_rows: List[Dict[str, Any]] = []
-                        for it in items:
-                            evidence_rows.extend(horizon_to_rows(it))
-                        ev_df = pd.DataFrame(evidence_rows)
-
-                        wanted = [
-                            "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
-                            "horizon(일)",
-                            "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
-                            "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
-                            "리포트총점", "리포트PDF", "상세페이지"
-                        ]
-                        cols = [c for c in wanted if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted]
-                        ev_df = ev_df[cols]
-
-                        if "리포트PDF" in ev_df.columns:
-                            ev_df["리포트PDF"] = ev_df["리포트PDF"].map(_norm_url)
-                        if "상세페이지" in ev_df.columns:
-                            ev_df["상세페이지"] = ev_df["상세페이지"].map(_norm_url)
-
-                        try:
-                            st.dataframe(
-                                ev_df,
-                                use_container_width=True,
-                                column_config={
-                                    "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
-                                    "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
-                                },
-                            )
-                        except Exception:
-                            def _a(href):
-                                return f'<a href="{href}" target="_blank" rel="noopener noreferrer">열기</a>' if href else ""
-                            html_df = ev_df.copy()
-                            if "리포트PDF" in html_df.columns:
-                                html_df["리포트PDF"] = html_df["리포트PDF"].map(_a)
-                            if "상세페이지" in html_df.columns:
-                                html_df["상세페이지"] = html_df["상세페이지"].map(_a)
-                            st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+        if not rank_pick:
+            st.info("상단 표에서 체크박스로 행을 선택하세요.")
         else:
-            st.dataframe(_show_df.drop(columns=["_row"], errors="ignore") if "_row" in _show_df else _show_df,
-                         use_container_width=True, height=GRID_H)
-            st.info("행 선택은 st-aggrid 설치 시 활성화됩니다.")
+            picked_name = rank_pick.get("Analyst", "Unknown Analyst")
+            picked_broker = rank_pick.get("Broker", "Unknown Broker")
+            st.markdown(f"### {picked_name} — {picked_broker}")
+            st.write(f"**Reports:** {rank_pick.get('Reports', '-') } | **RankScore:** {rank_pick.get('RankScore', '-') }")
+            st.write(f"**Coverage:** {rank_pick.get('FirstReport', '-') } → {rank_pick.get('LastReport', '-') }")
+
+            with st.spinner("Loading evidence..."):
+                items = load_detail_for_analyst(picked_name, picked_broker, date_from, date_to)
+
+            if not items:
+                st.info("상세 데이터가 없습니다.")
+            else:
+                evidence_rows: List[Dict[str, Any]] = []
+                for it in items:
+                    evidence_rows.extend(horizon_to_rows(it))
+                ev_df = pd.DataFrame(evidence_rows)
+
+                wanted = [
+                    "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
+                    "horizon(일)",
+                    "구간최고종가", "구간최저종가", "구간마지막종가", "목표가대비최대도달%",
+                    "리포트일에 매수했을경우 수익률%", "방향정답", "방향점수", "목표근접점수", "목표가HIT",
+                    "리포트총점", "리포트PDF", "상세페이지"
+                ]
+                cols = [c for c in wanted if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted]
+                ev_df = ev_df[cols]
+
+                colcfg = {
+                    "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
+                    "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
+                }
+                # 상세표는 선택 불필요 → disabled 모드
+                render_safe_table(
+                    ev_df, key="rank_evidence_table",
+                    page_size=50, selectable=False, height=TABLE_SCROLL_HEIGHT,
+                    column_config=colcfg
+                )
 
 # ===============================
 # 탭2: 종목별 검색
@@ -766,7 +698,6 @@ with tab_stock:
     stock_q = st.text_input("종목명(부분일치 허용)", key="stock_q", placeholder="예: 삼성전자")
     ticker_q = st.text_input("티커(정확히 6자리)", key="ticker_q", placeholder="예: 005930")
 
-    # 1) 후보 만들기
     candidates = []
     if stock_q.strip():
         seen = set()
@@ -781,7 +712,6 @@ with tab_stock:
                     candidates.append({"label": label, "stock": s, "ticker": t})
         candidates.sort(key=lambda x: (x["stock"], x["ticker"]))
 
-    # 2) 후보 선택
     selected_stock = None
     selected_ticker = None
     if candidates:
@@ -794,19 +724,13 @@ with tab_stock:
             default_index = 0
             if "last_stock_pick" in st.session_state and st.session_state["last_stock_pick"] in opt_labels:
                 default_index = opt_labels.index(st.session_state["last_stock_pick"])
-            pick = st.selectbox(
-                "후보 종목 선택",
-                options=opt_labels,
-                index=default_index,
-                key="cand_pick"
-            )
+            pick = st.selectbox("후보 종목 선택", options=opt_labels, index=default_index, key="cand_pick")
             st.session_state["last_stock_pick"] = pick
             _picked = next((c for c in candidates if c["label"] == pick), None)
             if _picked:
                 selected_stock = _picked["stock"]
                 selected_ticker = (_picked["ticker"] or "").strip() or None
 
-    # 3) 필터링
     if selected_stock:
         _sel_tk = (selected_ticker or "").strip()
         stock_docs = [
@@ -830,7 +754,8 @@ with tab_stock:
         st.info("해당 조건의 리포트가 없습니다. 종목명/티커 또는 기간/증권사를 조정해 보세요.")
     else:
         from collections import defaultdict
-        # 증권사 요약
+
+        # 1) 증권사 요약
         by_broker = defaultdict(lambda: {"reports":0, "analysts":set(), "first":None, "last":None})
         for x in stock_docs:
             b = (x.get("broker") or "").strip()
@@ -852,9 +777,9 @@ with tab_stock:
         } for b, v in by_broker.items()]
         broker_df = pd.DataFrame(broker_rows).sort_values(["리포트수","애널리스트수"], ascending=[False, False])
         st.markdown("### 1) 증권사별 요약")
-        st.dataframe(broker_df, use_container_width=True)
+        render_safe_table(broker_df, key="stock_broker_summary", page_size=25, selectable=False, height=None)
 
-        # 애널리스트 요약
+        # 2) 애널리스트 요약
         st.markdown("### 2) 애널리스트별 요약")
         brokers_for_select = sorted({(x.get("broker") or "").strip() for x in stock_docs if x.get("broker")})
         pick_broker = st.selectbox("증권사 선택", ["(모두)"] + brokers_for_select, index=0, key="stock_pick_broker")
@@ -880,24 +805,18 @@ with tab_stock:
             "최종리포트일": v["last"] or "",
         } for a, v in by_anl.items()]
         anl_df = pd.DataFrame(anl_rows).sort_values(["평균점수","리포트수"], ascending=[False, False]).reset_index(drop=True)
-        st.dataframe(anl_df, use_container_width=True)
+        render_safe_table(anl_df, key="stock_anl_summary", page_size=25, selectable=False, height=None)
 
-        # (데이터 구성부는 기존 그대로 유지)
+        # 3) 상세 내역
         st.markdown("### 3) 상세 내역")
-
-        # 모바일에서 표를 늦게 로드: 버튼 → 렌더 허용
-        if not aggrid_gate("stock", "상세 표 로드"):
-            st.stop()
-
         detail_rows = []
         title_map_stock = fetch_titles_for_records(stock_docs)
         for r in stock_docs:
             title_safe = _title_from_map_or_fields(r, title_map_stock) or f'{(r.get("stock") or "").strip()} 리포트'
-            last_close = None
             try:
                 last_close = last_close_from_horizons(r)
             except Exception:
-                pass
+                last_close = None
             detail_rows.append({
                 "리포트일": r.get("report_date",""),
                 "증권사": r.get("broker",""),
@@ -908,80 +827,37 @@ with tab_stock:
                 "마지막종가": last_close,
                 "제목": title_safe,
             })
-
         det_df = pd.DataFrame(detail_rows).sort_values("리포트일", ascending=False).reset_index(drop=True)
 
         if det_df.empty:
-            st.info("상단 표에서 행을 클릭(선택)하세요.")
-
-        if _AGGRID_AVAILABLE and not det_df.empty:
-            det_df_ag = det_df.reset_index(drop=True).copy()
-            det_df_ag.insert(0, "_row", det_df_ag.index)
-
-            page_size = st.selectbox(
-                "상세 내역 페이지 크기",
-                options=[25, 50, 100, 200],
-                index=1,
-                key="detail_page_size"
-            )
-
-            gb = GridOptionsBuilder.from_dataframe(det_df_ag)
-            gb.configure_column("목표가", width=110, type=["numericColumn"])
-            gb.configure_column("마지막종가", width=110, type=["numericColumn"])
-            gb.configure_column("레이팅", width=110)
-            gb.configure_selection(selection_mode="single", use_checkbox=False)
-            gb.configure_column("_row", header_name="", hide=True)
-            gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
-            gb.configure_default_column(
-                editable=False, groupable=False, enableValue=False, enableRowGroup=False, enablePivot=False,
-            )
-            try:
-                gb.configure_side_bar(False)
-            except Exception:
-                pass
-
-            grid = AgGrid(
-                det_df_ag,
-                gridOptions=gb.build(),
-                update_mode=GridUpdateMode.SELECTION_CHANGED,
-                data_return_mode=DataReturnMode.AS_INPUT,
-                theme="streamlit",
-                allow_unsafe_jscode=True,
-                fit_columns_on_grid_load=True,
+            st.info("상단 표에서 행을 선택하세요.")
+        else:
+            page_size = st.selectbox("상세 내역 페이지 크기", options=[25, 50, 100, 200], index=1, key="detail_page_size")
+            det_view, det_pick = render_safe_table(
+                det_df,
+                key="stock_detail_main_table_safe",
+                page_size=page_size,
+                selectable=True,
+                auto_pick_first=True,
                 height=TABLE_SCROLL_HEIGHT,
-                key="stock_detail_main_table",
-                enable_enterprise_modules=False,
             )
 
-            sel = grid.get("selected_rows", [])
-
-            def _pick_first(sel):
-                if isinstance(sel, list):
-                    return sel[0] if sel else None
-                if isinstance(sel, pd.DataFrame):
-                    return sel.iloc[0].to_dict() if not sel.empty else None
-                return None
-
-            picked = _pick_first(sel)
-            if not picked and not det_df_ag.empty:
-                picked = det_df_ag.iloc[0].to_dict()
-
-            if picked:
+            if det_pick:
                 st.markdown("---")
                 st.markdown("#### 📌 선택 리포트 상세")
 
-                p_stock  = picked.get("종목","")
-                p_ticker = picked.get("티커","")
-                if not p_ticker:
-                    for _r in stock_docs:
-                        t = str(_r.get("ticker") or "").strip()
-                        s = (_r.get("stock") or "").strip()
-                        if s == p_stock and t:
-                            p_ticker = t
-                            break
-                p_broker = picked.get("증권사","")
-                p_anl    = picked.get("애널리스트","")
-                p_date   = picked.get("리포트일","")
+                p_stock  = det_pick.get("종목","")
+                p_ticker = ""
+                # 티커 추정(원본 docs에서 종목명 매칭)
+                for _r in stock_docs:
+                    t = str(_r.get("ticker") or "").strip()
+                    s = (_r.get("stock") or "").strip()
+                    if s == p_stock and t:
+                        p_ticker = t
+                        break
+                p_broker = det_pick.get("증권사","")
+                p_anl    = det_pick.get("애널리스트","")
+                p_date   = det_pick.get("리포트일","")
 
                 c1, c2, c3, c4 = st.columns([2,2,2,2])
                 c1.markdown(f"**종목/티커**: {p_stock} ({p_ticker or '-'})")
@@ -1003,14 +879,10 @@ with tab_stock:
                         rd = (it.get("report_date") or "").strip()
                         if rd: dates.append(rd)
 
-                    rank_score = 0.0
-                    if reports_n:
-                        rank_score = total_pts / reports_n if metric == "avg" else total_pts
-
+                    rank_score = (total_pts / reports_n) if reports_n and metric == "avg" else total_pts
                     cov_first = min(dates) if dates else "-"
                     cov_last  = max(dates) if dates else "-"
-
-                    st.write(f"**Reports:** {reports_n}  |  **RankScore:** {round(rank_score, 4)}  |  **Coverage:** {cov_first} → {cov_last}")
+                    st.write(f"**Reports:** {reports_n}  |  **RankScore:** {round(rank_score, 4) if reports_n else 0.0}  |  **Coverage:** {cov_first} → {cov_last}")
 
                 if items:
                     rows_ev = []
@@ -1028,41 +900,17 @@ with tab_stock:
                     cols = [c for c in wanted_cols if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted_cols]
                     ev_df = ev_df[cols]
 
-                    if "리포트PDF" in ev_df.columns:
-                        ev_df["리포트PDF"] = ev_df["리포트PDF"].map(_norm_url)
-                    if "상세페이지" in ev_df.columns:
-                        ev_df["상세페이지"] = ev_df["상세페이지"].map(_norm_url)
-
-                    try:
-                        st.dataframe(
-                            ev_df,
-                            use_container_width=True,
-                            column_config={
-                                "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
-                                "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
-                            },
-                        )
-                    except Exception:
-                        def _a(href):
-                            return f'<a href="{href}" target="_blank" rel="noopener noreferrer">열기</a>' if href else ""
-                        html_df = ev_df.copy()
-                        if "리포트PDF" in html_df.columns:
-                            html_df["리포트PDF"] = html_df["리포트PDF"].map(_a)
-                        if "상세페이지" in html_df.columns:
-                            html_df["상세페이지"] = html_df["상세페이지"].map(_a)
-                        st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    colcfg = {
+                        "리포트PDF": st.column_config.LinkColumn(label="리포트PDF", display_text="열기"),
+                        "상세페이지": st.column_config.LinkColumn(label="상세페이지", display_text="열기"),
+                    }
+                    render_safe_table(
+                        ev_df, key="stock_detail_evidence_table",
+                        page_size=50, selectable=False, height=TABLE_SCROLL_HEIGHT,
+                        column_config=colcfg
+                    )
                 else:
                     st.info("선택한 애널리스트의 상세 근거가 없습니다.")
 
                 st.markdown("#### 📈 종목 정보")
                 st.markdown(f"[네이버 금융 상세 보기]({naver_item_url(p_ticker)})")
-        else:
-            per_page = st.selectbox("상세 내역 페이지 크기", [25, 50, 100, 200], index=1, key="detail_page_size_fallback")
-            total = len(det_df)
-            total_pages = (total + per_page - 1) // per_page
-            page = st.number_input("페이지", 1, max(1, total_pages), 1, key="detail_page_num_fallback")
-            start = (page - 1) * per_page
-            end = min(start + per_page, total)
-            st.caption(f"Page {page}/{total_pages} · Rows {start+1}-{end} / {total}")
-            st.dataframe(det_df.iloc[start:end], use_container_width=True, height=TABLE_SCROLL_HEIGHT)
-            st.info("행 클릭(선택)을 사용하려면 `streamlit-aggrid` 설치가 필요합니다.")
