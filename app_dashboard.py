@@ -14,6 +14,11 @@ os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 # 1) Streamlit import + set_page_config (파일 최초의 st.* 호출)
 import streamlit as st
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+if not st.session_state.get("_post_boot_rerun"):
+    st.session_state["_post_boot_rerun"] = True
+    # 첫 프레임에서는 컴포넌트 렌더를 막고 즉시 리런 → 두 번째 프레임에서만 렌더
+    st.info("초기화 중…")
+    st.experimental_rerun()
 REV = os.getenv("GIT_SHA") or os.getenv("K_REVISION") or "r1"
 if st.query_params.get("_v") != REV:
     st.query_params["_v"] = REV  # URL에 ?_v=REV 추가 → streamlitUrl 파라미터에도 반영됨
