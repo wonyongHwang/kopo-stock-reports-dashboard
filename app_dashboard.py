@@ -5,98 +5,59 @@
 - 탭2: 🔎 종목별 검색
 """
 
-# ==== ⬇️ 파일 최상단 (어떤 st.* 호출보다 먼저) ===================================
+# ==== 상단 공통 부트스트랩 (모든 st.* 호출보다 먼저) ====
 import os
 os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
+# (선택) 오류 토스트 최소화: 최신 스트리믈릿에선 아래가 일부 완화에 도움
+# os.environ.setdefault("STREAMLIT_SERVER_ENABLECORS", "false")
 
 import time
-from pathlib import Path
-import glob
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid
 import st_aggrid as _ag
 
-# 1) 반드시 첫 번째 st.* 호출: 페이지 설정
+# 1) 가장 먼저 page_config
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 
-
-# 2) 캐시버스터 토큰 계산 (리비전 or 실제 CSS 해시 → 항상 '어떤 값'은 만들어진다)
-def compute_revision_token() -> str:
-    # Cloud Run이 주입하는 리비전명이 최우선
-    rev = os.getenv("K_REVISION") or os.getenv("GIT_SHA")
-    if rev:
-        return rev
-    # st_aggrid가 설치된 CSS의 실제 해시 파일명 사용 (빌드 바뀌면 파일명도 바뀜)
-    try:
-        build_dir = Path(_ag.__file__).with_name("frontend") / "build" / "static" / "css"
-        css_files = sorted(build_dir.glob("main.*.css"))
-        if css_files:
-            return css_files[-1].name  # 예: 'main.564ee9fd.css'
-    except Exception:
-        pass
-    # 패키지 버전 조합 (최후 폴백)
-    try:
-        import streamlit as _st
-        return f"st-{_st.__version__}"
-    except Exception:
-        return "r1"
-
-REV = compute_revision_token()
-
-# 3) 쿼리 파라미터(캐시버스터) 1회만 설정 → 즉시 리런 (부트 게이트보다 먼저 처리!)
-if hasattr(st, "query_params"):
-    if st.query_params.get("_v") != REV:
-        st.query_params["_v"] = REV  # 이 변경은 리런을 유발
-        st.rerun()
-else:
-    # 구버전 호환(필요시)
-    st.experimental_set_query_params(_v=REV)
-    st.rerun()
-
-
-# 4) 부트 게이트: 총 1회만 리런되도록 보장
+# 2) 부트 게이트: 최대 1회만 리런 (원치 않으면 아래 블록을 통째로 주석 처리해도 됩니다)
 def boot_gate():
-    phase = st.session_state.get("boot_phase", 0)
-
-    # 프레임 1: 세션만 붙이고 즉시 리런 (컴포넌트 렌더/쿼리파라미터 변경 금지)
+    phase = st.session_state.get("_boot_phase", 0)
     if phase == 0:
-        st.session_state["boot_phase"] = 1
+        # 첫 프레임: 세션만 붙이고 한 번만 리런
+        st.session_state["_boot_phase"] = 1
         st.rerun()
-
-    # 프레임 2: 여기서만 전역 웜업(컴포넌트 라우트 등록) → 완료 후 1회 리런
     elif phase == 1:
+        # 두 번째 프레임: 전역 1회 웜업(컴포넌트 라우트 등록) — iframe은 아직 만들지 않음
         try:
             ph = st.empty()
             with ph.container():
                 AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
             ph.empty()
-            st.session_state["aggrid_ready"] = True
+            st.session_state["_aggrid_ready"] = True
         except Exception as e:
-            # 웜업 실패해도 다음 프레임에서 다시 시도 가능
-            st.warning(f"AgGrid 웜업 실패: {e}")
-        st.session_state["boot_phase"] = 2
-        st.rerun()
-
-    # phase >= 2 : 본 UI 단계
+            # 실패해도 본 UI는 진행. 표 탭에서 다시 한 번 더디 지연을 주고 시도합니다.
+            st.session_state["_aggrid_ready"] = False
+        st.session_state["_boot_phase"] = 2
+        # 여기서 추가 리런은 하지 않음(리런 과다 → Bad message format 유발)
     else:
         return
 
-boot_gate()  # ← 어떤 AgGrid/탭/마크다운보다 먼저 호출
+# 필요시만 켜세요. 이미 새로고침 없이 로딩이 충분하면 주석 처리해도 OK
+boot_gate()
 
-
-# 5) AgGrid 렌더 허용 여부 헬퍼 (렌더 직전 50~100ms 살짝 지연으로 잔여 레이스 제거)
-def ready_for_aggrid() -> bool:
-    if st.session_state.get("boot_phase", 0) < 2:
+def aggrid_can_render() -> bool:
+    """AgGrid를 실제로 렌더해도 되는지 최종 체크 + 렌더 직전 짧은 지연."""
+    if st.session_state.get("_boot_phase", 0) < 1:   # 세션 미부착
         return False
-    if not st.session_state.get("aggrid_ready", False):
-        return False
-    time.sleep(0.07)  # 렌더 직전 70ms 지연 → 초기 레이스 억제
+    # 웜업 성공 여부는 '좋음' 옵션일 뿐, 실패해도 아래 지연 후 렌더 시도
+    time.sleep(0.12)  # 렌더 직전 120ms 지연: 잔여 레이스 컷
     return True
 
-# ==== ⬆️ 여기까지가 공통 부트스트랩 ===============================================
+# ==== 여기까지 공통 부트스트랩 ====
+
 
 
     
@@ -114,22 +75,6 @@ from google.cloud import firestore
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import st_aggrid as _ag
 
-# 3) AgGrid 전역 1회 웜업 (set_page_config 이후, 어떤 UI 렌더보다 먼저)
-if not hasattr(st, "_aggrid_warmed"):
-    comp_dir = os.path.join(os.path.dirname(_ag.__file__), "frontend", "build")
-    print("[BOOT] st_aggrid at:", os.path.dirname(_ag.__file__))
-    print("[BOOT] st_aggrid frontend exists:", os.path.exists(os.path.join(comp_dir, "index.html")))
-    ph = st.empty()
-    with ph.container():
-        AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
-    ph.empty()
-    st._aggrid_warmed = True
-    print("[BOOT] AgGrid warmup done")
-
-# 4) (선택) 초기 프레임 레이스 완화를 위한 1프레임 지연
-if not st.session_state.get("_first_paint_done"):
-    time.sleep(0.1)  # 50~150ms 사이 권장
-    st.session_state["_first_paint_done"] = True
 
 # --- 여기부터 기존 코드 이어서 붙이세요 (유틸/함수/Firestore 등) ---
 
