@@ -11,43 +11,38 @@ os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 
-# --- Boot state machine: 세션 → 웜업 → 본 UI ---
 import streamlit as st
+import pandas as pd
+from st_aggrid import AgGrid
 
-if "boot_phase" not in st.session_state:
-    st.session_state.boot_phase = 0  # 0: attach session only, 1: do warmup, 2+: run app
+def boot_gate():
+    phase = st.session_state.get("boot_phase", 0)
 
-phase = st.session_state.boot_phase
+    # 프레임 1: 세션만 붙이고 즉시 리런 (컴포넌트 렌더/쿼리파라미터 변경 금지)
+    if phase == 0:
+        st.session_state["boot_phase"] = 1
+        st.rerun()  # ← st.stop() 대신 즉시 재실행
 
-if phase == 0:
-    # 프레임 1: 세션만 붙이고 종료 (컴포넌트/쿼리 파라미터/리런 호출 금지)
-    st.session_state.boot_phase = 1
-    st.caption("초기화 준비 중…")
-    st.stop()
+    # 프레임 2: 여기서만 전역 웜업 수행 후 리런
+    elif phase == 1:
+        try:
+            ph = st.empty()
+            with ph.container():
+                AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
+            ph.empty()
+            st.session_state["aggrid_ready"] = True
+        except Exception as e:
+            st.warning(f"웜업 실패: {e}")
+            # 실패해도 다음 프레임 시도 위해 진행
+        st.session_state["boot_phase"] = 2
+        st.rerun()
 
-elif phase == 1:
-    # 프레임 2: 여기서만 전역 웜업을 수행 → 컴포넌트 라우트 등록
-    import pandas as pd
-    try:
-        from st_aggrid import AgGrid
-        ph = st.empty()
-        with ph.container():
-            AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
-        ph.empty()
-        setattr(st, "_aggrid_warmed", True)
-    except Exception as e:
-        st.warning(f"웜업 실패: {e}")  # 실패해도 본 UI는 막음(다음 프레임에서 재시도 가능)
-    # 캐시버스터/쿼리파라미터 변경은 여기서!
-    import os
-    REV = os.getenv("K_REVISION") or os.getenv("GIT_SHA") or "r1"
-    if hasattr(st, "query_params"):
-        if st.query_params.get("_v") != REV:
-            st.query_params["_v"] = REV
+    # phase >= 2 : 본 UI 진행
     else:
-        st.experimental_set_query_params(_v=REV)
+        return
 
-    st.session_state.boot_phase = 2
-    st.experimental_rerun()  # 프레임 3으로 진입
+boot_gate()  # ← 어떤 AgGrid/탭/마크다운보다 먼저!
+
 
 # phase >= 2 에서만 본 UI/AgGrid를 렌더
 
