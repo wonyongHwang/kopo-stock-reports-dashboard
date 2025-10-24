@@ -5,25 +5,68 @@
 - 탭2: 🔎 종목별 검색
 """
 
-# 0) 표준/환경 설정 — Streamlit import 전에
+# ==== ⬇️ 파일 최상단 (어떤 st.* 호출보다 먼저) ===================================
 import os
 os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 
-import streamlit as st
+import time
+from pathlib import Path
+import glob
 import pandas as pd
+import streamlit as st
 from st_aggrid import AgGrid
+import st_aggrid as _ag
 
+# 1) 반드시 첫 번째 st.* 호출: 페이지 설정
+st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
+
+
+# 2) 캐시버스터 토큰 계산 (리비전 or 실제 CSS 해시 → 항상 '어떤 값'은 만들어진다)
+def compute_revision_token() -> str:
+    # Cloud Run이 주입하는 리비전명이 최우선
+    rev = os.getenv("K_REVISION") or os.getenv("GIT_SHA")
+    if rev:
+        return rev
+    # st_aggrid가 설치된 CSS의 실제 해시 파일명 사용 (빌드 바뀌면 파일명도 바뀜)
+    try:
+        build_dir = Path(_ag.__file__).with_name("frontend") / "build" / "static" / "css"
+        css_files = sorted(build_dir.glob("main.*.css"))
+        if css_files:
+            return css_files[-1].name  # 예: 'main.564ee9fd.css'
+    except Exception:
+        pass
+    # 패키지 버전 조합 (최후 폴백)
+    try:
+        import streamlit as _st
+        return f"st-{_st.__version__}"
+    except Exception:
+        return "r1"
+
+REV = compute_revision_token()
+
+# 3) 쿼리 파라미터(캐시버스터) 1회만 설정 → 즉시 리런 (부트 게이트보다 먼저 처리!)
+if hasattr(st, "query_params"):
+    if st.query_params.get("_v") != REV:
+        st.query_params["_v"] = REV  # 이 변경은 리런을 유발
+        st.rerun()
+else:
+    # 구버전 호환(필요시)
+    st.experimental_set_query_params(_v=REV)
+    st.rerun()
+
+
+# 4) 부트 게이트: 총 1회만 리런되도록 보장
 def boot_gate():
     phase = st.session_state.get("boot_phase", 0)
 
     # 프레임 1: 세션만 붙이고 즉시 리런 (컴포넌트 렌더/쿼리파라미터 변경 금지)
     if phase == 0:
         st.session_state["boot_phase"] = 1
-        st.rerun()  # ← st.stop() 대신 즉시 재실행
+        st.rerun()
 
-    # 프레임 2: 여기서만 전역 웜업 수행 후 리런
+    # 프레임 2: 여기서만 전역 웜업(컴포넌트 라우트 등록) → 완료 후 1회 리런
     elif phase == 1:
         try:
             ph = st.empty()
@@ -32,19 +75,29 @@ def boot_gate():
             ph.empty()
             st.session_state["aggrid_ready"] = True
         except Exception as e:
-            st.warning(f"웜업 실패: {e}")
-            # 실패해도 다음 프레임 시도 위해 진행
+            # 웜업 실패해도 다음 프레임에서 다시 시도 가능
+            st.warning(f"AgGrid 웜업 실패: {e}")
         st.session_state["boot_phase"] = 2
         st.rerun()
 
-    # phase >= 2 : 본 UI 진행
+    # phase >= 2 : 본 UI 단계
     else:
         return
 
-boot_gate()  # ← 어떤 AgGrid/탭/마크다운보다 먼저!
+boot_gate()  # ← 어떤 AgGrid/탭/마크다운보다 먼저 호출
 
 
-# phase >= 2 에서만 본 UI/AgGrid를 렌더
+# 5) AgGrid 렌더 허용 여부 헬퍼 (렌더 직전 50~100ms 살짝 지연으로 잔여 레이스 제거)
+def ready_for_aggrid() -> bool:
+    if st.session_state.get("boot_phase", 0) < 2:
+        return False
+    if not st.session_state.get("aggrid_ready", False):
+        return False
+    time.sleep(0.07)  # 렌더 직전 70ms 지연 → 초기 레이스 억제
+    return True
+
+# ==== ⬆️ 여기까지가 공통 부트스트랩 ===============================================
+
 
     
 # 2) 나머지 라이브러리 import
