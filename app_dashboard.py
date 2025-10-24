@@ -10,19 +10,26 @@ import os
 os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
-# (선택) 오류 토스트 최소화: 최신 스트리믈릿에선 아래가 일부 완화에 도움
-# os.environ.setdefault("STREAMLIT_SERVER_ENABLECORS", "false")
 
 import time
+import re
+import math
+import datetime as dt
+from typing import List, Dict, Any
+
 import pandas as pd
+import pytz
 import streamlit as st
-from st_aggrid import AgGrid
+from google.cloud import firestore
+
+# st_aggrid는 한 번만 정확한 이름으로 import
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import st_aggrid as _ag
 
 # 1) 가장 먼저 page_config
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 
-# 2) 부트 게이트: 최대 1회만 리런 (원치 않으면 아래 블록을 통째로 주석 처리해도 됩니다)
+# 2) 부트 게이트: 최대 1회만 리런 (원치 않으면 블록 전체 주석 처리 가능)
 def boot_gate():
     phase = st.session_state.get("_boot_phase", 0)
     if phase == 0:
@@ -37,80 +44,55 @@ def boot_gate():
                 AgGrid(pd.DataFrame({"_": []}), height=1, key="__aggrid_warmup__", fit_columns_on_grid_load=False)
             ph.empty()
             st.session_state["_aggrid_ready"] = True
-        except Exception as e:
-            # 실패해도 본 UI는 진행. 표 탭에서 다시 한 번 더디 지연을 주고 시도합니다.
+        except Exception:
             st.session_state["_aggrid_ready"] = False
         st.session_state["_boot_phase"] = 2
         # 여기서 추가 리런은 하지 않음(리런 과다 → Bad message format 유발)
     else:
         return
 
-# 필요시만 켜세요. 이미 새로고침 없이 로딩이 충분하면 주석 처리해도 OK
 boot_gate()
 
-def aggrid_can_render() -> bool:
-    """AgGrid를 실제로 렌더해도 되는지 최종 체크 + 렌더 직전 짧은 지연."""
-    if st.session_state.get("_boot_phase", 0) < 1:   # 세션 미부착
+def aggrid_can_render(delay_ms_mobile=350, delay_ms_desktop=120) -> bool:
+    """AgGrid 렌더 최종 체크 + 렌더 직전 짧은 지연(모바일은 더 길게)."""
+    if st.session_state.get("_boot_phase", 0) < 2:
         return False
-    # 웜업 성공 여부는 '좋음' 옵션일 뿐, 실패해도 아래 지연 후 렌더 시도
-    time.sleep(0.12)  # 렌더 직전 120ms 지연: 잔여 레이스 컷
+    # 모바일 여부: 사이드바 토글로 제어(기본 True 권장)
+    is_mobile = st.session_state.get("_is_mobile", True)
+    time.sleep((delay_ms_mobile if is_mobile else delay_ms_desktop) / 1000.0)
     return True
+
+def aggrid_gate(tab_key: str, button_label: str) -> bool:
+    """
+    모바일 안정화를 위해 '표 로드' 버튼을 누른 뒤에만 AgGrid를 생성.
+    데스크톱은 곧바로 렌더(원한다면 동일 UX로 바꿀 수 있음).
+    """
+    is_mobile = st.session_state.get("_is_mobile", True)
+    flag_key = f"__load_{tab_key}__"
+
+    if is_mobile and not st.session_state.get(flag_key, False):
+        col = st.columns([1,1,1])[1]
+        with col:
+            if st.button(button_label, use_container_width=True, type="primary"):
+                st.session_state[flag_key] = True
+                st.rerun()
+        st.info("모바일 안정화를 위해 버튼을 눌러 표를 로드하세요.")
+        return False
+
+    return aggrid_can_render()
 
 # ==== 여기까지 공통 부트스트랩 ====
 
 
-
-    
-# 2) 나머지 라이브러리 import
-import re
-import math
-import time
-import datetime as dt
-from typing import List, Dict, Any
-import pandas as pd
-import pytz
-from google.cloud import firestore
-
-# st_aggrid는 한 번만 정확한 이름으로 import
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-import st_aggrid as _ag
-
-
-# --- 여기부터 기존 코드 이어서 붙이세요 (유틸/함수/Firestore 등) ---
-
-
-
-import math
-import datetime as dt
-from typing import List, Dict, Any
-import re
-import time  # ← 중복 import 정리 (dt는 위에서)
-
-import streamlit as st
-import pandas as pd
-import pytz
-from google.cloud import firestore
-import os
-os.environ.setdefault("STREAMLIT_CACHE_DIR", "/tmp/streamlit-cache")
-os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
-# Streamlit 1.29+는 아래도 지원
-os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
-
-
-# ====== Ag-Grid 옵션 ======
+# ====== Ag-Grid 옵션 가용성 ======
 _AGGRID_AVAILABLE = True
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
+    from st_aggrid import AgGrid  # 이미 import됨(안전차원)
 except Exception:
     _AGGRID_AVAILABLE = False
 
-# == debugging for 404
-
-
-
-
 # 표 스크롤 높이(픽셀)
-TABLE_SCROLL_HEIGHT = 520  # 필요하면 420~680 사이로 조절
+TABLE_SCROLL_HEIGHT = 520  # 필요시 조절
 
 # -----------------------------
 # 정규화 & 유틸
@@ -122,11 +104,9 @@ def naver_item_url(ticker: str | None) -> str:
     return f"https://finance.naver.com/item/main.naver?code={t}"
 
 def last_close_from_horizons(rec: dict) -> float | None:
-    """horizons[].price_sample[]에서 가장 최근 close 값을 반환"""
     horizons = rec.get("horizons") or []
     if not horizons:
         return None
-    # end_date 기준으로 정렬 후, 가장 뒤의 price_sample 마지막 close 사용
     try:
         horizons = sorted(horizons, key=lambda h: h.get("end_date",""))
     except Exception:
@@ -139,13 +119,12 @@ def last_close_from_horizons(rec: dict) -> float | None:
             last_close = float(closes[-1])
     return last_close
 
-
 def normalize_broker_name(name: str) -> str:
     if not name:
         return ""
-    name = re.sub(r"\s+", "", name)           # 모든 공백 제거
-    name = re.sub(r"[&/\.#\[\]]", "_", name)  # Firestore 예약문자 치환
-    name = re.sub(r"[\(\)\[\]]", "", name)    # 괄호류 제거
+    name = re.sub(r"\s+", "", name)
+    name = re.sub(r"[&/\.#\[\]]", "_", name)
+    name = re.sub(r"[\(\)\[\]]", "", name)
     return name.strip()
 
 def normalize_analyst_name(name: str) -> str:
@@ -178,7 +157,6 @@ def format_ts(ts, tz=KST):
     return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 def _aggrid_selected_empty(sel) -> bool:
-    """AgGrid selected_rows 가 list 또는 DataFrame 양쪽을 안전하게 비었는지 판별"""
     if isinstance(sel, list):
         return len(sel) == 0
     if isinstance(sel, pd.DataFrame):
@@ -186,7 +164,6 @@ def _aggrid_selected_empty(sel) -> bool:
     return True
 
 def _aggrid_pick_first(sel):
-    """AgGrid selected_rows 에서 첫 행 dict로 꺼내기 (list/DF 모두 지원)"""
     if isinstance(sel, list):
         return sel[0] if sel else None
     if isinstance(sel, pd.DataFrame):
@@ -200,7 +177,7 @@ def _aggrid_pick_first(sel):
 def get_db():
     return firestore.Client()
 
-# --- [ADD] analyst_reports에서 title 배치 조회 (report_id -> title 매핑) ---
+# --- analyst_reports에서 title 배치 조회 (report_id -> title 매핑) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
     db = get_db()
@@ -217,7 +194,6 @@ def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
     try:
         snaps = db.get_all(refs)
     except Exception:
-        # 네트워크/권한 오류 시 빈 매핑
         return {}
 
     out = {}
@@ -231,7 +207,6 @@ def fetch_titles_for_records(records: list[dict]) -> dict[str, str]:
     return out
 
 def _pick_title(rec: dict) -> str:
-    """레코드 안에서 제목 후보 필드들을 우선순위로 선택"""
     for k in ["title", "report_title", "subject", "report_subject", "headline", "name"]:
         t = (rec.get(k) or "").strip()
         if t:
@@ -239,17 +214,12 @@ def _pick_title(rec: dict) -> str:
     return ""
 
 def _title_from_map_or_fields(rec: dict, title_map: dict[str, str] | None = None) -> str:
-    """title_map(analyst_reports 기반) 우선 → 현재 레코드의 후보 필드 → 안전한 대체제목"""
     rid = str(rec.get("report_id") or "").strip()
     if title_map and rid in title_map:
         return title_map[rid]
-
-    # 기존 후보 필드 먼저 시도
     t = _pick_title(rec)
     if t:
         return t
-
-    # 완전 실패 시: 안전한 대체 조합
     stock = (rec.get("stock") or "").strip()
     rdate = (rec.get("report_date") or "").strip()
     return f"{stock or '리포트'} ({rdate or '-'})"
@@ -260,20 +230,17 @@ def _title_from_map_or_fields(rec: dict, title_map: dict[str, str] | None = None
 @st.cache_data(show_spinner=False, ttl=60)
 def load_analyst_docs(date_from: dt.date, date_to: dt.date,
                       brokers: List[str] | None, limit: int = 3000) -> List[Dict[str, Any]]:
-    """evaluations/by_analyst 그룹에서 기간/브로커 필터로 문서 로드"""
     db = get_db()
-
     docs_raw = []
     server_filtered = False
     try:
         q = db.collection_group("by_analyst")
         want_min = date_from.isoformat() if date_from else None
-        # next day for exclusive upper bound
         want_max_excl = (date_to + dt.timedelta(days=1)).isoformat() if date_to else None
 
         q = db.collection_group("by_analyst")
-        if want_min:     q = q.where("report_date", ">=", want_min)
-        if want_max_excl:q = q.where("report_date", "<",  want_max_excl)
+        if want_min:      q = q.where("report_date", ">=", want_min)
+        if want_max_excl: q = q.where("report_date", "<",  want_max_excl)
         q = q.limit(limit)
         docs_raw = list(q.stream())
         server_filtered = True
@@ -286,18 +253,16 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
     for d in docs_raw:
         x = d.to_dict() or {}
         broker_norm = normalize_broker_name((x.get("broker") or "").strip())
-        # ✅ '한국IR협의회' 제외
-        if broker_norm == "한국IR협의회" or "평가" in broker_norm :
+        # ✅ '한국IR협의회' 제외 + '평가' 라벨 배제
+        if broker_norm == "한국IR협의회" or "평가" in broker_norm:
             continue
         if broker_set and broker_norm not in broker_set:
             continue
         x["broker"] = broker_norm
-        # 애널리스트 이름 정규화 보조 필드
         raw_name = (x.get("analyst_name") or x.get("analyst") or "").strip()
         x["analyst_name"] = raw_name
         x["analyst_name_norm"] = x.get("analyst_name_norm") or normalize_analyst_name(raw_name)
 
-        # 클라이언트 쪽 기간 필터 fallback
         if not server_filtered and (date_from or date_to):
             s = (x.get("report_date") or "").strip()
             if not s:
@@ -311,7 +276,6 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
             if date_to and d0 > date_to:
                 continue
 
-        # points_total 보정
         if x.get("points_total") is None and x.get("horizons"):
             x["points_total"] = sum(float(h.get("points_total_this_horizon") or 0.0) for h in x.get("horizons") or [])
         out.append(x)
@@ -322,7 +286,6 @@ def load_analyst_docs(date_from: dt.date, date_to: dt.date,
 def load_detail_for_analyst(analyst_name: str, broker: str,
                             date_from: dt.date | None, date_to: dt.date | None,
                             limit: int = 800) -> List[Dict[str, Any]]:
-    """특정 애널리스트(이름+브로커)의 근거 문서들"""
     db = get_db()
     out: List[Dict[str, Any]] = []
     broker_norm = normalize_broker_name(broker)
@@ -352,7 +315,6 @@ def load_detail_for_analyst(analyst_name: str, broker: str,
         if target_norm != analyst_name:
             out.extend(_q("analyst_name", target_norm))
 
-    # 중복 제거
     seen = set(); uniq = []
     for r in out:
         key = (str(r.get("report_id","")), str(r.get("pdf_url","")))
@@ -372,13 +334,14 @@ def make_rank_table(docs: list[dict], metric: str = "avg", min_reports: int = 2)
         name_raw = (x.get("analyst_name") or x.get("analyst") or "").strip()
         name_norm = x.get("analyst_name_norm") or normalize_analyst_name(name_raw)
         broker = normalize_broker_name((x.get("broker") or "").strip())
-        pts = 0.0
-        try: pts = float(x.get("points_total") or 0.0)
-        except Exception: pass
+        try:
+            pts = float(x.get("points_total") or 0.0)
+        except Exception:
+            pts = 0.0
         rdate = (x.get("report_date") or "").strip()
         key = f"{name_norm}|{broker}"
         agg[key]["sum"] += pts
-        agg[key]["n"] += 1
+        agg[key]["n"]  += 1
         if not agg[key]["name_disp"]:
             agg[key]["name_disp"] = name_raw or "(unknown)"
         agg[key]["broker"] = broker
@@ -435,10 +398,9 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     horizons = rec.get("horizons") or []
     rating_norm = rec.get("rating_norm") or rec.get("rating")
     target_price = rec.get("target_price")
-
     for h in horizons:
         desired = _desired_from_horizon(h)
-        ret = h.get("return_pct", None)  # start_close 대비 end_close 수익률
+        ret = h.get("return_pct", None)
         actual_sign = _sign(ret)
         correct = None
         if desired is not None and actual_sign is not None:
@@ -448,7 +410,6 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
         sample = h.get("price_sample") or []
         max_c, min_c, last_c = _price_stats(sample)
 
-        # 목표가 대비 수익률 (마지막 종가 기준)
         target_return_pct = None
         if target_price and target_price not in ("", 0, 0.0) and last_c:
             try:
@@ -456,7 +417,6 @@ def horizon_to_rows(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             except Exception:
                 target_return_pct = None
 
-        # 목표가 대비 최대 도달률 (최고가 기준)
         max_reach_pct = None
         if target_price and target_price not in ("", 0, 0.0) and max_c:
             try:
@@ -521,67 +481,40 @@ def get_last_updated_from_docs(docs):
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-# st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
 st.title("📊 종목리포트 분석")
+
 # --- Tabs 시인성 향상 (CSS 스타일 주입: 최소 변경) ---
 st.markdown("""
 <style>
-/* 탭 묶음 하단 경계선 & 간격 */
 div[data-testid="stTabs"] div[role="tablist"] {
   border-bottom: 2px solid #e9ecef;
-  gap: 8px;
-  padding-bottom: 2px;
-  margin-bottom: 8px;
+  gap: 8px; padding-bottom: 2px; margin-bottom: 8px;
 }
-
-/* 각 탭 버튼: 기본(비활성) 스타일 */
 div[data-testid="stTabs"] button[role="tab"] {
-  font-weight: 600;
-  font-size: 0.95rem;
-  color: #495057;
-  background: #f8f9fa;
-  border: 1px solid #e9ecef;
-  border-bottom: none; /* 아래쪽은 콘텐츠 카드와 연결되므로 없앰 */
-  border-top-left-radius: 8px;
-  border-top-right-radius: 8px;
-  padding: 10px 14px;
-  box-shadow: inset 0 -3px 0 0 rgba(0,0,0,0.03);
+  font-weight: 600; font-size: 0.95rem; color: #495057;
+  background: #f8f9fa; border: 1px solid #e9ecef; border-bottom: none;
+  border-top-left-radius: 8px; border-top-right-radius: 8px;
+  padding: 10px 14px; box-shadow: inset 0 -3px 0 0 rgba(0,0,0,0.03);
 }
-
-/* Hover 시 살짝 강조 */
-div[data-testid="stTabs"] button[role="tab"]:hover {
-  background: #f1f3f5;
-  color: #343a40;
-}
-
-/* 활성 탭 */
+div[data-testid="stTabs"] button[role="tab"]:hover { background: #f1f3f5; color: #343a40; }
 div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-  background: #ffffff;
-  color: #212529;
-  border-color: #dee2e6;
-  box-shadow: inset 0 -4px 0 0 #0d6efd; /* 상단 파란 강조선(브랜드 컬러 느낌) */
+  background: #ffffff; color: #212529; border-color: #dee2e6;
+  box-shadow: inset 0 -4px 0 0 #0d6efd;
 }
-
-/* 탭 패널(내용) 카드 스타일 */
 div[data-testid="stTabs"] > div[data-baseweb="tab-panel"] {
-  border: 1px solid #dee2e6;
-  border-top: none; /* 활성 탭 버튼과 자연스럽게 이어지도록 */
-  border-radius: 0 10px 10px 10px;
-  padding: 16px 16px 10px 16px;
-  background: #ffffff;
+  border: 1px solid #dee2e6; border-top: none; border-radius: 0 10px 10px 10px;
+  padding: 16px 16px 10px 16px; background: #ffffff;
 }
-
-/* 작은 화면에서 탭 라벨이 두 줄이 될 때 줄 간격 */
-div[data-testid="stTabs"] button[role="tab"] p {
-  line-height: 1.1;
-  margin: 0;
-}
+div[data-testid="stTabs"] button[role="tab"] p { line-height: 1.1; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ---- 사이드바 ----
 with st.sidebar:
     st.header("공통 필터")
+    # 모바일 안정화 모드 토글(권장: True)
+    st.session_state["_is_mobile"] = st.toggle("모바일 안정화 모드", value=st.session_state.get("_is_mobile", True))
+
     today = dt.date.today()
     default_from = today - dt.timedelta(days=90)
     date_from = st.date_input("From date", value=default_from)
@@ -635,9 +568,7 @@ st.markdown(
 date_values = [str(d.get("report_date", "")).strip() for d in docs if str(d.get("report_date","")).strip()]
 if date_values:
     try:
-        min_date = min(date_values)
-        max_date = max(date_values)
-        st.markdown(f"**평가 반영 기간** {min_date} ~ {max_date}")
+        st.markdown(f"**평가 반영 기간** {min(date_values)} ~ {max(date_values)}")
     except Exception:
         st.markdown("**평가 반영 기간** - ~ -")
 else:
@@ -651,7 +582,6 @@ st.caption(f"최근 평가 반영 시각(문서 기준): {format_ts(get_last_upd
 today = dt.date.today()
 is_today_range = (date_from and date_to and date_from <= today <= date_to)
 
-# 신선도 배너
 if is_today_range:
     by_cnt = sum(1 for d in docs if str(d.get("report_date","")).startswith(today.isoformat()))
     db = get_db()
@@ -662,13 +592,11 @@ if is_today_range:
     if ar_cnt > by_cnt:
         st.warning(f"오늘 데이터 동기화 진행 중: by_analyst {by_cnt}건 / analyst_reports {ar_cnt}건")
 
-# === 탭2(종목별 검색) 전용: 오늘 범위면 analyst_reports 병합 ===
-docs_for_stock = docs[:]  # 기본은 by_analyst 결과
+docs_for_stock = docs[:]
 if is_today_range:
     db = get_db()
     iso_min = date_from.isoformat()
     iso_max_excl = (date_to + dt.timedelta(days=1)).isoformat()
-
     try:
         q_ar = (db.collection("analyst_reports")
                   .where("pred_time", ">=", iso_min)
@@ -677,8 +605,6 @@ if is_today_range:
         rows = [s.to_dict() or {} for s in q_ar.stream()]
     except Exception:
         rows = []
-
-    # 중복 제거용 키(기존 docs 먼저 반영)
     seen = set((
         str(x.get("report_id") or ""),
         normalize_broker_name(x.get("broker") or ""),
@@ -687,17 +613,14 @@ if is_today_range:
     ) for x in docs_for_stock)
 
     for x in rows:
-        # 날짜 정규화: 문자열 YYYY-MM-DD로 통일
         rd = (x.get("report_date") or x.get("pred_time") or "")
         x["report_date"] = str(rd)[:10] if rd else ""
 
-        # 브로커 정규화 (+ 과도 배제 제거)
         b = normalize_broker_name(x.get("broker") or "")
         if b == "한국IR협의회":
             continue
         x["broker"] = b
 
-        # 애널리스트 표준화
         a_raw = (x.get("analyst_name") or x.get("analyst") or "").strip()
         x["analyst_name"] = a_raw
         x["analyst_name_norm"] = x.get("analyst_name_norm") or normalize_analyst_name(a_raw)
@@ -714,7 +637,7 @@ if is_today_range:
 tab_rank, tab_stock = st.tabs(["🏆 종목리포트 평가 랭킹보드", "🔎 종목별 검색"])
 
 # ===============================
-# 탭1: 랭킹보드 (페이지네이션 복원)
+# 탭1: 랭킹보드
 # ===============================
 with tab_rank:
     st.subheader("🏆 Top Analysts")
@@ -723,7 +646,10 @@ with tab_rank:
     if rank_df.empty:
         st.info("조건에 맞는 데이터가 없습니다. 기간/브로커/최소 리포트 수를 조정하세요.")
     else:
-        # --- 페이지네이션(복원) ---
+        # 모바일은 버튼 눌러 로드 → 데스크톱은 즉시
+        if not aggrid_gate("rank", "랭킹 표 로드"):
+            st.stop()
+
         per_page = st.selectbox("Rows per page", [10, 25, 50, 100], index=1, key="rank_rows_per_page")
         page = st.number_input("Page", 1, 9999, 1, key="rank_page")
         total_pages = max(1, math.ceil(len(rank_df) / per_page))
@@ -732,7 +658,6 @@ with tab_rank:
         show_df = rank_df.iloc[start:end].copy()
         st.caption(f"Page {page}/{total_pages} · Total analysts: {len(rank_df)}")
 
-        # Ag-Grid 렌더링 (선택 안정화)
         selected_idx = None
         _show_df = show_df.reset_index(drop=True).copy()
         ROW_H, HEAD_H, PADDING = 34, 40, 32
@@ -744,14 +669,8 @@ with tab_rank:
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_grid_options(rowHeight=ROW_H, headerHeight=HEAD_H)
             gb.configure_column("_row", header_name="", hide=True)
-
-            # ⬇️ Community 고정: 엔터프라이즈 기능 OFF
             gb.configure_default_column(
-                editable=False,
-                groupable=False,
-                enableValue=False,
-                enableRowGroup=False,
-                enablePivot=False,
+                editable=False, groupable=False, enableValue=False, enableRowGroup=False, enablePivot=False,
             )
             try:
                 gb.configure_side_bar(False)
@@ -767,7 +686,7 @@ with tab_rank:
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
                 height=GRID_H,
-                enable_enterprise_modules=False,  # ← Enterprise 경고 방지
+                enable_enterprise_modules=False,
             )
             sel = grid.get("selected_rows", [])
             if _aggrid_selected_empty(sel):
@@ -794,7 +713,6 @@ with tab_rank:
                             evidence_rows.extend(horizon_to_rows(it))
                         ev_df = pd.DataFrame(evidence_rows)
 
-                        # 컬럼 순서
                         wanted = [
                             "보고서일", "종목", "티커", "레이팅", "예측포지션", "예측목표가",
                             "horizon(일)",
@@ -805,7 +723,6 @@ with tab_rank:
                         cols = [c for c in wanted if c in ev_df.columns] + [c for c in ev_df.columns if c not in wanted]
                         ev_df = ev_df[cols]
 
-                        # 링크 맵
                         if "리포트PDF" in ev_df.columns:
                             ev_df["리포트PDF"] = ev_df["리포트PDF"].map(_norm_url)
                         if "상세페이지" in ev_df.columns:
@@ -830,7 +747,6 @@ with tab_rank:
                                 html_df["상세페이지"] = html_df["상세페이지"].map(_a)
                             st.markdown(html_df.to_html(escape=False, index=False), unsafe_allow_html=True)
         else:
-            # 폴백 표기
             st.dataframe(_show_df.drop(columns=["_row"], errors="ignore") if "_row" in _show_df else _show_df,
                          use_container_width=True, height=GRID_H)
             st.info("행 선택은 st-aggrid 설치 시 활성화됩니다.")
@@ -840,7 +756,6 @@ with tab_rank:
 # ===============================
 if "stock_q" not in st.session_state:
     st.session_state["stock_q"] = ""
-
 if "ticker_q" not in st.session_state:
     st.session_state["ticker_q"] = ""
 
@@ -848,11 +763,10 @@ with tab_stock:
     st.subheader("🔎 종목별 리포트 조회")
     col1, col2 = st.columns([2,1])
 
-    # 세션 상태 사용
     stock_q = st.text_input("종목명(부분일치 허용)", key="stock_q", placeholder="예: 삼성전자")
     ticker_q = st.text_input("티커(정확히 6자리)", key="ticker_q", placeholder="예: 005930")
 
-    # 1) 입력된 종목명으로 후보(종목명,티커) 목록 만들기 (docs_for_stock 사용)
+    # 1) 후보 만들기
     candidates = []
     if stock_q.strip():
         seen = set()
@@ -873,7 +787,7 @@ with tab_stock:
     if candidates:
         if len(candidates) == 1:
             selected_stock = candidates[0]["stock"]
-            selected_ticker = (candidates[0]["ticker"] or "").strip() or None  # ← 빈 값은 None 처리
+            selected_ticker = (candidates[0]["ticker"] or "").strip() or None
             st.session_state["last_stock_pick"] = candidates[0]["label"]
         else:
             opt_labels = [c["label"] for c in candidates]
@@ -890,11 +804,11 @@ with tab_stock:
             _picked = next((c for c in candidates if c["label"] == pick), None)
             if _picked:
                 selected_stock = _picked["stock"]
-                selected_ticker = (_picked["ticker"] or "").strip() or None  # ← 빈 값은 None 처리
+                selected_ticker = (_picked["ticker"] or "").strip() or None
 
-    # 3) 필터링 로직 (docs_for_stock 사용)
+    # 3) 필터링
     if selected_stock:
-        _sel_tk = (selected_ticker or "").strip()  # ← 빈 값이면 ""
+        _sel_tk = (selected_ticker or "").strip()
         stock_docs = [
             d for d in docs_for_stock
             if (d.get("stock") or "").strip() == selected_stock
@@ -970,32 +884,29 @@ with tab_stock:
 
         # (데이터 구성부는 기존 그대로 유지)
         st.markdown("### 3) 상세 내역")
+
+        # 모바일에서 표를 늦게 로드: 버튼 → 렌더 허용
+        if not aggrid_gate("stock", "상세 표 로드"):
+            st.stop()
+
         detail_rows = []
         title_map_stock = fetch_titles_for_records(stock_docs)
-
         for r in stock_docs:
-            title_safe = _title_from_map_or_fields(r, title_map_stock)
-            if not title_safe:
-                title_safe = f'{(r.get("stock") or "").strip()} 리포트'
-
+            title_safe = _title_from_map_or_fields(r, title_map_stock) or f'{(r.get("stock") or "").strip()} 리포트'
             last_close = None
             try:
                 last_close = last_close_from_horizons(r)
-            except:
+            except Exception:
                 pass
-
             detail_rows.append({
                 "리포트일": r.get("report_date",""),
                 "증권사": r.get("broker",""),
                 "애널리스트": r.get("analyst_name") or r.get("analyst",""),
                 "종목": r.get("stock",""),
-                # "티커": r.get("ticker",""),
                 "레이팅": r.get("rating") or r.get("rating_norm",""),
                 "목표가": r.get("target_price"),
                 "마지막종가": last_close,
                 "제목": title_safe,
-                # "리포트PDF": r.get("pdf_url","") or r.get("report_url",""),
-                # "상세페이지": r.get("detail_url",""),
             })
 
         det_df = pd.DataFrame(detail_rows).sort_values("리포트일", ascending=False).reset_index(drop=True)
@@ -1005,9 +916,8 @@ with tab_stock:
 
         if _AGGRID_AVAILABLE and not det_df.empty:
             det_df_ag = det_df.reset_index(drop=True).copy()
-            det_df_ag.insert(0, "_row", det_df_ag.index)   # 내부키
+            det_df_ag.insert(0, "_row", det_df_ag.index)
 
-            # ✅ 페이지 크기 선택 UI (세션 유지)
             page_size = st.selectbox(
                 "상세 내역 페이지 크기",
                 options=[25, 50, 100, 200],
@@ -1016,26 +926,14 @@ with tab_stock:
             )
 
             gb = GridOptionsBuilder.from_dataframe(det_df_ag)
-
-            # 숫자 컬럼 폭/타입(기존 유지)
             gb.configure_column("목표가", width=110, type=["numericColumn"])
             gb.configure_column("마지막종가", width=110, type=["numericColumn"])
             gb.configure_column("레이팅", width=110)
-
-            # 단일 선택 + 내부키 숨김
             gb.configure_selection(selection_mode="single", use_checkbox=False)
             gb.configure_column("_row", header_name="", hide=True)
-
-            # ✅ Ag-Grid 내장 페이지네이션
             gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
-
-            # 커뮤니티 기능만 (엔터프라이즈 경고 방지)
             gb.configure_default_column(
-                editable=False,
-                groupable=False,
-                enableValue=False,
-                enableRowGroup=False,
-                enablePivot=False,
+                editable=False, groupable=False, enableValue=False, enableRowGroup=False, enablePivot=False,
             )
             try:
                 gb.configure_side_bar(False)
@@ -1050,14 +948,13 @@ with tab_stock:
                 theme="streamlit",
                 allow_unsafe_jscode=True,
                 fit_columns_on_grid_load=True,
-                height=TABLE_SCROLL_HEIGHT,        # 스크롤 영역
+                height=TABLE_SCROLL_HEIGHT,
                 key="stock_detail_main_table",
-                enable_enterprise_modules=False,    # 엔터프라이즈 경고 방지
+                enable_enterprise_modules=False,
             )
 
             sel = grid.get("selected_rows", [])
 
-            # 선택 행 없으면 첫 행 자동 선택(재실행에도 UX 안정)
             def _pick_first(sel):
                 if isinstance(sel, list):
                     return sel[0] if sel else None
@@ -1085,8 +982,6 @@ with tab_stock:
                 p_broker = picked.get("증권사","")
                 p_anl    = picked.get("애널리스트","")
                 p_date   = picked.get("리포트일","")
-                p_pdf    = picked.get("리포트PDF","")
-                p_det    = picked.get("상세페이지","")
 
                 c1, c2, c3, c4 = st.columns([2,2,2,2])
                 c1.markdown(f"**종목/티커**: {p_stock} ({p_ticker or '-'})")
@@ -1094,7 +989,6 @@ with tab_stock:
                 c3.markdown(f"**애널리스트**: {p_anl}")
                 c4.markdown(f"**리포트일**: {p_date}")
 
-                # (A) 동일 애널리스트 근거 — 랭킹 탭과 같은 형식
                 st.markdown("#### 📄 해당 애널리스트의 근거 내역")
                 with st.spinner("애널리스트 상세 로딩..."):
                     items = load_detail_for_analyst(p_anl, p_broker, date_from, date_to)
@@ -1160,12 +1054,9 @@ with tab_stock:
                 else:
                     st.info("선택한 애널리스트의 상세 근거가 없습니다.")
 
-                # (B) 종목 재무 스냅샷 + 네이버 링크
                 st.markdown("#### 📈 종목 정보")
                 st.markdown(f"[네이버 금융 상세 보기]({naver_item_url(p_ticker)})")
-
         else:
-            # st.dataframe 폴백일 때도 수동 페이지네이션 제공
             per_page = st.selectbox("상세 내역 페이지 크기", [25, 50, 100, 200], index=1, key="detail_page_size_fallback")
             total = len(det_df)
             total_pages = (total + per_page - 1) // per_page
