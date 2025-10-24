@@ -14,7 +14,10 @@ os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 # 1) Streamlit import + set_page_config (파일 최초의 st.* 호출)
 import streamlit as st
 st.set_page_config(page_title="한국폴리텍대학 스마트금융과", layout="wide")
-
+REV = os.getenv("GIT_SHA") or os.getenv("K_REVISION") or "r1"
+if st.query_params.get("_v") != REV:
+    st.query_params["_v"] = REV  # URL에 ?_v=REV 추가 → streamlitUrl 파라미터에도 반영됨
+    
 # 2) 나머지 라이브러리 import
 import re
 import math
